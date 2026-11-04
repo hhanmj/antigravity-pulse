@@ -49,7 +49,7 @@ def save_ls_env(status: str = "init", error: str = ""):
         payload = {
             "address": addr or existing.get("address", ""),
             "csrf": csrf or existing.get("csrf", ""),
-            "pulse_version": "3.1",
+            "pulse_version": "3.3",
             "status": status,
             "error": error,
             "updated_at": time.strftime("%H:%M:%S"),
@@ -160,7 +160,7 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '3.2';
+    window.__AGY_PULSE_VERSION = '3.3';
 
     // Always remove old style AND old DOM container so hot-reload cleanly re-binds all events
     const oldStyle = document.getElementById('agy-ctx-hud-style');
@@ -237,29 +237,6 @@ SETUP_JS = r"""
             font-size: 11.5px;
             font-variant-numeric: tabular-nums;
             letter-spacing: -0.02em;
-        }
-        .agy-hud-mode-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 3px;
-            height: 20px;
-            padding: 0 6px;
-            margin-left: 2px;
-            border-radius: 999px;
-            border: 1px solid var(--hud-border);
-            background: var(--hud-well);
-            color: var(--hud-muted);
-            font-size: 11px;
-            font-weight: 500;
-            line-height: 1;
-            cursor: pointer;
-            transition: all 0.14s ease;
-            white-space: nowrap;
-        }
-        .agy-hud-mode-btn:hover {
-            background: var(--hud-hover-bg);
-            color: var(--hud-fg);
-            border-color: var(--hud-muted);
         }
 
         /* Native Antigravity Menu Popover Card (1:1 aligned with 'Model / View Usage') */
@@ -574,7 +551,6 @@ SETUP_JS = r"""
                 <div class="agy-hud-pill" data-tab="activity" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
                 <div class="agy-hud-pill" data-tab="usage" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
                 <div class="agy-hud-pill" data-tab="context" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
-                <div class="agy-hud-mode-btn" onclick="return window.__toggleAgyPulseMode(event)" title="点击切换 [极简 / 详细] UI 模式"></div>
                 <div class="agy-hud-popover">
                     <div class="agy-hud-panel" data-panel="activity"></div>
                     <div class="agy-hud-panel" data-panel="usage"></div>
@@ -624,11 +600,6 @@ SETUP_JS = r"""
 
         const mode = window.__agyPulseMode || 'minimal';
         g.dataset.mode = mode;
-
-        const modeBtn = g.querySelector('.agy-hud-mode-btn');
-        if (modeBtn) {
-            modeBtn.innerHTML = `<span style="opacity:0.7">⇄</span><span>${mode === 'pro' ? '详细' : '极简'}</span>`;
-        }
 
         const act = data.activity || {};
         const usg = data.usage || {};
@@ -970,7 +941,7 @@ def run_sync_loop():
             if data:
                 payload = json.dumps(data, ensure_ascii=False)
                 js_call = (
-                    f"(window.__AGY_PULSE_VERSION === '3.2' && typeof window.__updateAntigravityGauge === 'function') "
+                    f"(window.__AGY_PULSE_VERSION === '3.3' && typeof window.__updateAntigravityGauge === 'function') "
                     f"? window.__updateAntigravityGauge({payload}) : 'NEED_SETUP'"
                 )
                 results = []
