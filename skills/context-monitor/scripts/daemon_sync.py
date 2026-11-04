@@ -140,10 +140,14 @@ class SimpleWebSocket:
             if resp.get("id") == msg_id:
                 return resp
 
-    def call_cdp(self, method: str, params: dict = None, msg_id: int = 1):
+    def call_cdp(
+        self, method: str, params: dict = None, msg_id: int = 1, session_id: str = ""
+    ):
         req = {"id": msg_id, "method": method}
         if params:
             req["params"] = params
+        if session_id:
+            req["sessionId"] = session_id
         self.send_text(json.dumps(req))
         while True:
             resp = json.loads(self.recv_text())
@@ -160,7 +164,7 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '3.4';
+    window.__AGY_PULSE_VERSION = '3.6';
 
     // 1. Clean up and neutralize any legacy v1/v2 ('dsh-*' / 'antigravity-context-gauge-*') DOM elements, styles, and intervals
     const cleanupLegacy = () => {
@@ -194,13 +198,13 @@ SETUP_JS = r"""
     style.id = 'agy-ctx-hud-style';
     style.textContent = `
         #agy-ctx-gauge {
-            --hud-bg: var(--card, var(--onyx-raised, #ffffff));
-            --hud-well: var(--secondary, var(--onyx-well, rgba(128, 128, 128, 0.08)));
-            --hud-border: var(--card-border, var(--border, rgba(128, 128, 128, 0.16)));
-            --hud-fg: var(--foreground, #18181b);
-            --hud-fg-sec: var(--secondary-foreground, #3f3f46);
-            --hud-muted: var(--muted-foreground, #71717a);
-            --hud-hover-bg: var(--secondary, rgba(128, 128, 128, 0.1));
+            --hud-bg: color-mix(in srgb, var(--popover, var(--card, #18181b)) 96%, var(--background, #09090b));
+            --hud-well: var(--secondary, var(--onyx-well, rgba(128, 128, 128, 0.12)));
+            --hud-border: var(--card-border, var(--border, rgba(128, 128, 128, 0.22)));
+            --hud-fg: var(--foreground, #f4f4f5);
+            --hud-fg-sec: var(--secondary-foreground, #d4d4d8);
+            --hud-muted: var(--muted-foreground, #a1a1aa);
+            --hud-hover-bg: var(--secondary, rgba(128, 128, 128, 0.14));
             --hud-font: var(--editor-font-family, 'JetBrains Mono', Consolas, monospace);
 
             --c-blue: var(--chart-blue, #3b82f6);
@@ -212,25 +216,27 @@ SETUP_JS = r"""
             position: relative;
             display: inline-flex;
             align-items: center;
+            flex-wrap: nowrap;
+            flex-shrink: 0;
             gap: 2px;
-            margin-left: 6px;
+            margin-left: 4px;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
             user-select: none;
-            z-index: 50;
+            z-index: 999;
         }
 
         /* Bottom Bar Pills */
         .agy-hud-pill {
             display: inline-flex;
             align-items: center;
-            gap: 5px;
-            height: 24px;
-            padding: 0 7px;
+            gap: 4px;
+            height: 22px;
+            padding: 0 6px;
             border-radius: 6px;
             border: 1px solid transparent;
             background: transparent;
             color: var(--hud-muted);
-            font-size: 12px;
+            font-size: 11.5px;
             font-weight: 500;
             line-height: 1;
             cursor: pointer;
@@ -238,7 +244,8 @@ SETUP_JS = r"""
             white-space: nowrap;
         }
         #agy-ctx-gauge[data-mode="pro"] .agy-hud-pill {
-            background: color-mix(in srgb, var(--hud-well) 45%, transparent);
+            background: color-mix(in srgb, var(--hud-well) 50%, transparent);
+            padding: 0 5.5px;
         }
         .agy-hud-pill:hover,
         .agy-hud-pill.active {
@@ -252,11 +259,11 @@ SETUP_JS = r"""
         }
         .agy-hud-pill .sep {
             opacity: 0.45;
-            margin: 0 1px;
+            margin: 0 0.5px;
         }
         .agy-hud-pill .mono-val {
             font-family: var(--hud-font);
-            font-size: 11.5px;
+            font-size: 11px;
             font-variant-numeric: tabular-nums;
             letter-spacing: -0.02em;
         }
@@ -266,12 +273,15 @@ SETUP_JS = r"""
             position: absolute;
             bottom: calc(100% + 8px);
             right: 0;
-            width: 292px;
+            width: 296px;
             padding: 12px 14px;
             border-radius: 10px;
-            background: var(--hud-bg);
+            background-color: var(--background, #141416);
+            background-image: linear-gradient(var(--hud-bg), var(--hud-bg));
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border: 1px solid var(--hud-border);
-            box-shadow: 0 10px 30px -6px rgba(0, 0, 0, 0.16), 0 4px 12px -2px rgba(0, 0, 0, 0.08);
+            box-shadow: 0 12px 32px -4px rgba(0, 0, 0, 0.36), 0 4px 12px -2px rgba(0, 0, 0, 0.18);
             color: var(--hud-fg);
             opacity: 0;
             visibility: hidden;
@@ -279,7 +289,7 @@ SETUP_JS = r"""
             transform-origin: bottom right;
             transition: opacity 0.14s ease, transform 0.14s ease, visibility 0.14s;
             pointer-events: none;
-            z-index: 9999;
+            z-index: 99999;
         }
         #agy-ctx-gauge.open .agy-hud-popover {
             opacity: 1;
@@ -307,6 +317,7 @@ SETUP_JS = r"""
             font-weight: 500;
             color: var(--hud-muted);
             letter-spacing: 0.01em;
+            white-space: nowrap;
         }
         .agy-eyebrow-actions {
             display: inline-flex;
@@ -573,6 +584,9 @@ SETUP_JS = r"""
             toolbarRight = toolbarRight.parentElement;
         }
         if (!toolbarRight) return false;
+        toolbarRight.style.position = 'relative';
+        toolbarRight.style.zIndex = '100';
+        toolbarRight.style.flexWrap = 'nowrap';
 
         let g = document.getElementById('agy-ctx-gauge');
         if (!g) {
@@ -647,21 +661,21 @@ SETUP_JS = r"""
         // 1. Pill 1: Activity / Speed
         const pillAct = g.querySelector('[data-tab="activity"]');
         const tpsVal = Math.round(act.decode_tps || act.e2e_tps || 0);
-        const gaugeSvg = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>`;
+        const gaugeSvg = `<svg width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>`;
         if (mode === 'minimal') {
             pillAct.innerHTML = `${gaugeSvg}<span class="mono-val">${tpsVal} tok/s</span>`;
         } else {
-            pillAct.innerHTML = `${gaugeSvg}<span>${act.turns || 0} 轮 ${act.steps || 0} 步</span><span class="sep">·</span><span class="mono-val">${tpsVal} tok/s</span>`;
+            pillAct.innerHTML = `${gaugeSvg}<span>${act.turns || 0}轮 ${act.steps || 0}步</span><span class="sep">·</span><span class="mono-val">${tpsVal} tok/s</span>`;
         }
 
         // 2. Pill 2: Cache & Token Usage
         const pillUsg = g.querySelector('[data-tab="usage"]');
         const hitVal = Math.round(usg.cache_hit_pct || 0);
-        const dbSvg = `<svg width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>`;
+        const dbSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>`;
         if (mode === 'minimal') {
             pillUsg.innerHTML = `${dbSvg}<span>缓存命中 <span class="mono-val">${hitVal}%</span></span>`;
         } else {
-            pillUsg.innerHTML = `${dbSvg}<span class="mono-val">${window.__fmtTok(usg.total_tokens || 0)} tok</span><span class="sep">·</span><span>缓存命中 <span class="mono-val">${hitVal}%</span></span>`;
+            pillUsg.innerHTML = `${dbSvg}<span class="mono-val">${window.__fmtTok(usg.total_tokens || 0)}</span><span class="sep">·</span><span>缓存 <span class="mono-val">${hitVal}%</span></span>`;
         }
 
         // 3. Pill 3: Context Window Ring
@@ -784,7 +798,7 @@ SETUP_JS = r"""
             <div class="agy-eyebrow-row">
                 <span class="agy-eyebrow-title">上下文容量 · Context</span>
                 <div class="agy-eyebrow-actions">
-                    <span class="agy-tag">${data.model_label || 'Model'}</span>
+                    <span class="agy-tag">${(data.model || data.model_label || 'Model').replace(/\\s*\\(.*?\\)/g, '')}</span>
                     ${modeBadgeHtml}
                 </div>
             </div>
@@ -977,7 +991,7 @@ def run_sync_loop():
             if data:
                 payload = json.dumps(data, ensure_ascii=False)
                 js_call = (
-                    f"(window.__AGY_PULSE_VERSION === '3.4' && typeof window.__updateAntigravityGauge === 'function') "
+                    f"(window.__AGY_PULSE_VERSION === '3.6' && typeof window.__updateAntigravityGauge === 'function') "
                     f"? window.__updateAntigravityGauge({payload}) : 'NEED_SETUP'"
                 )
                 results = []
@@ -997,17 +1011,7 @@ def run_sync_loop():
                         val = resp2.get("result", {}).get("result", {}).get("value")
                         if val is None:
                             val = f"raw:{str(resp2)[:100]}"
-                    # Also inspect actual DOM in toolbarRight
-                    dom_probe = ws.eval_js(
-                        "(() => { const g = document.getElementById('agy-ctx-gauge'); if (!g) return 'NO_G'; const bar = g.parentElement?.parentElement || g.parentElement; const allAgy = Array.from(document.querySelectorAll('[id*=\"agy\"],[id*=\"ctx\"],[class*=\"dsh\"],iframe')).map(e => e.tagName + '#' + e.id + '.' + e.className + ':' + (e.src || e.innerText?.slice(0,30)?.replace(/\\n+/g,' '))); return JSON.stringify({bar_text: bar?.innerText?.replace(/\\n+/g,'|'), allAgy}); })()",
-                        msg_id,
-                        sid,
-                    )
-                    msg_id += 1
-                    probe_val = (
-                        dom_probe.get("result", {}).get("result", {}).get("value", "")
-                    )
-                    results.append(f"{uprefix[-15:]}={val} dom={probe_val}")
+                    results.append(f"{uprefix[-15:]}={val}")
                 save_ls_env(f"injected:{','.join(results)}", dbg_err)
             else:
                 save_ls_env("no_session_data")
