@@ -164,7 +164,7 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '3.7';
+    window.__AGY_PULSE_VERSION = '3.9';
 
     // 1. Clean up and neutralize any legacy v1/v2 ('dsh-*' / 'antigravity-context-gauge-*') DOM elements, styles, and intervals
     const cleanupLegacy = () => {
@@ -274,7 +274,8 @@ SETUP_JS = r"""
             position: absolute;
             bottom: calc(100% + 8px);
             right: 0;
-            width: 296px;
+            width: 308px;
+            box-sizing: border-box;
             padding: 12px 14px;
             border-radius: 10px;
             background-color: var(--background, #141416);
@@ -311,6 +312,7 @@ SETUP_JS = r"""
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 6px;
             margin-bottom: 8px;
         }
         .agy-eyebrow-title {
@@ -319,11 +321,14 @@ SETUP_JS = r"""
             color: var(--hud-muted);
             letter-spacing: 0.01em;
             white-space: nowrap;
+            flex-shrink: 0;
         }
         .agy-eyebrow-actions {
             display: inline-flex;
             align-items: center;
-            gap: 5px;
+            justify-content: flex-end;
+            gap: 4px;
+            min-width: 0;
         }
 
         /* Official Rounded Muted Pill Badge (like 'New' / 'Fast' / 'Notice') */
@@ -331,7 +336,7 @@ SETUP_JS = r"""
             display: inline-flex;
             align-items: center;
             gap: 3px;
-            padding: 1.5px 6.5px;
+            padding: 1.5px 6px;
             border-radius: 999px;
             background: var(--hud-well);
             color: var(--hud-muted);
@@ -339,17 +344,16 @@ SETUP_JS = r"""
             font-weight: 500;
             line-height: 1.35;
             white-space: nowrap;
-        }
-        .agy-tag.mono {
-            font-family: var(--hud-font);
-            font-variant-numeric: tabular-nums;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .agy-mode-switch {
             cursor: pointer;
             border: 1px solid var(--hud-border);
-            padding: 1.5px 7px;
+            padding: 1.5px 6.5px;
             transition: all 0.12s ease;
             user-select: none;
+            flex-shrink: 0;
         }
         .agy-mode-switch:hover {
             background: var(--hud-hover-bg);
@@ -509,6 +513,13 @@ SETUP_JS = r"""
     `;
     document.head.appendChild(style);
 
+    window.__isZh = () => {
+        const lang = navigator.language || (navigator.languages && navigator.languages[0]) || '';
+        if (lang) return /^zh/i.test(lang);
+        const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || '');
+        return /Shanghai|Chongqing|Urumqi|Hong_Kong|Taipei|Macau/i.test(tz);
+    };
+
     window.__fmtTok = (n) => {
         if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 1 : 2).replace(/\.0$/, '') + 'M';
         if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1).replace(/\.0$/, '') + 'K';
@@ -516,14 +527,15 @@ SETUP_JS = r"""
     };
 
     window.__fmtDur = (sec) => {
-        if (!sec || sec <= 0) return '0.0秒';
-        if (sec < 60) return sec.toFixed(1) + '秒';
+        const zh = window.__isZh();
+        if (!sec || sec <= 0) return zh ? '0.0秒' : '0.0s';
+        if (sec < 60) return sec.toFixed(1) + (zh ? '秒' : 's');
         const m = Math.floor(sec / 60);
         const s = Math.round(sec % 60);
-        if (m < 60) return m + '分' + (s < 10 ? '0' : '') + s + '秒';
+        if (m < 60) return zh ? (m + '分' + (s < 10 ? '0' : '') + s + '秒') : (m + 'm ' + s + 's');
         const h = Math.floor(m / 60);
         const rm = m % 60;
-        return h + '时' + rm + '分';
+        return zh ? (h + '时' + rm + '分') : (h + 'h ' + rm + 'm');
     };
 
     window.__mkRingSvg = (pct, colorVar, size = 14) => {
@@ -658,16 +670,17 @@ SETUP_JS = r"""
 
         const mode = window.__agyPulseMode || 'minimal';
         g.dataset.mode = mode;
+        const zh = window.__isZh();
 
         const act = data.activity || {};
         const usg = data.usage || {};
         const ctx = data.context_meter || {};
 
         const modeBadgeHtml = `
-            <span class="agy-tag agy-mode-switch" onclick="return window.__toggleAgyPulseMode(event)" title="点击切换 [极简 / 详细] 模式">
-                <span class="${mode === 'minimal' ? 'active-mode' : ''}">极简</span>
+            <span class="agy-tag agy-mode-switch" onclick="return window.__toggleAgyPulseMode(event)" title="${zh ? '点击切换 [极简 / 详细] 模式' : 'Switch [Min / Pro] mode'}">
+                <span class="${mode === 'minimal' ? 'active-mode' : ''}">${zh ? '极简' : 'Min'}</span>
                 <span style="opacity:0.35">|</span>
-                <span class="${mode === 'pro' ? 'active-mode' : ''}">详细</span>
+                <span class="${mode === 'pro' ? 'active-mode' : ''}">${zh ? '详细' : 'Pro'}</span>
             </span>
         `;
 
@@ -678,7 +691,8 @@ SETUP_JS = r"""
         if (mode === 'minimal') {
             pillAct.innerHTML = `${gaugeSvg}<span class="mono-val">${tpsVal} tok/s</span>`;
         } else {
-            pillAct.innerHTML = `${gaugeSvg}<span>${act.turns || 0}轮 ${act.steps || 0}步</span><span class="sep">·</span><span class="mono-val">${tpsVal} tok/s</span>`;
+            const turnStepTxt = zh ? `${act.turns || 0}轮 ${act.steps || 0}步` : `${act.turns || 0}T ${act.steps || 0}S`;
+            pillAct.innerHTML = `${gaugeSvg}<span>${turnStepTxt}</span><span class="sep">·</span><span class="mono-val">${tpsVal} tok/s</span>`;
         }
 
         // 2. Pill 2: Cache & Token Usage
@@ -686,9 +700,9 @@ SETUP_JS = r"""
         const hitVal = Math.round(usg.cache_hit_pct || 0);
         const dbSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>`;
         if (mode === 'minimal') {
-            pillUsg.innerHTML = `${dbSvg}<span>缓存命中 <span class="mono-val">${hitVal}%</span></span>`;
+            pillUsg.innerHTML = `${dbSvg}<span>${zh ? '缓存命中' : 'Cache'} <span class="mono-val">${hitVal}%</span></span>`;
         } else {
-            pillUsg.innerHTML = `${dbSvg}<span class="mono-val">${window.__fmtTok(usg.total_tokens || 0)}</span><span class="sep">·</span><span>缓存 <span class="mono-val">${hitVal}%</span></span>`;
+            pillUsg.innerHTML = `${dbSvg}<span class="mono-val">${window.__fmtTok(usg.total_tokens || 0)}</span><span class="sep">·</span><span>${zh ? '缓存' : 'Cache'} <span class="mono-val">${hitVal}%</span></span>`;
         }
 
         // 3. Pill 3: Context Window Ring
@@ -712,14 +726,14 @@ SETUP_JS = r"""
 
         panAct.innerHTML = `
             <div class="agy-eyebrow-row">
-                <span class="agy-eyebrow-title">会话统计 · Telemetry</span>
+                <span class="agy-eyebrow-title">${zh ? '会话统计' : 'Telemetry'}</span>
                 <div class="agy-eyebrow-actions">
-                    <span class="agy-tag mono">${act.turns || 0} 轮 · ${act.steps || 0} 步</span>
+                    <span class="agy-tag mono">${zh ? `${act.turns || 0} 轮 · ${act.steps || 0} 步` : `${act.turns || 0} turns · ${act.steps || 0} steps`}</span>
                     ${modeBadgeHtml}
                 </div>
             </div>
             <div class="pro-only">
-                <div class="agy-bar-track" title="耗时分布：思考等待 ${window.__fmtDur(act.ttft_total_sec)} / 流式输出 ${window.__fmtDur(act.stream_total_sec)} / 工具执行 ${window.__fmtDur(act.tool_time_sec)}">
+                <div class="agy-bar-track" title="${zh ? `耗时分布：思考等待 ${window.__fmtDur(act.ttft_total_sec)} / 流式输出 ${window.__fmtDur(act.stream_total_sec)} / 工具执行 ${window.__fmtDur(act.tool_time_sec)}` : `TTFT ${window.__fmtDur(act.ttft_total_sec)} / Stream ${window.__fmtDur(act.stream_total_sec)} / Tools ${window.__fmtDur(act.tool_time_sec)}`}">
                     <div class="agy-bar-seg" style="width:${thinkW}%;background:var(--c-purple)"></div>
                     <div class="agy-bar-seg" style="width:${streamW}%;background:var(--c-blue)"></div>
                     <div class="agy-bar-seg" style="width:${toolW}%;background:var(--c-green)"></div>
@@ -727,20 +741,20 @@ SETUP_JS = r"""
             </div>
             <div class="agy-hud-list">
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-purple)"></span>模型用时</span>
+                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-purple)"></span>${zh ? '模型用时' : 'Model Time'}</span>
                     <span class="agy-hud-val">${window.__fmtDur(act.llm_time_sec)}</span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-green)"></span>工具调用用时</span>
+                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-green)"></span>${zh ? '工具调用用时' : 'Tool Execution'}</span>
                     <span class="agy-hud-val">${window.__fmtDur(act.tool_time_sec)}</span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label">首 token 平均 (TTFT)</span>
-                    <span class="agy-hud-val">${(act.avg_ttft_sec || 0).toFixed(1)}秒</span>
+                    <span class="agy-hud-label">${zh ? '首 token 平均 (TTFT)' : 'Avg TTFT'}</span>
+                    <span class="agy-hud-val">${(act.avg_ttft_sec || 0).toFixed(1)}${zh ? '秒' : 's'}</span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label">输出速度 (TPS)</span>
-                    <span class="agy-hud-val">${tpsVal} tok/s <span class="sub pro-only">(均值 ${Math.round(act.e2e_tps || 0)})</span></span>
+                    <span class="agy-hud-label">${zh ? '输出速度 (TPS)' : 'Output Speed (TPS)'}</span>
+                    <span class="agy-hud-val">${tpsVal} tok/s <span class="sub pro-only">(${zh ? '均值' : 'avg'} ${Math.round(act.e2e_tps || 0)})</span></span>
                 </div>
             </div>
         `;
@@ -750,40 +764,40 @@ SETUP_JS = r"""
         const cacheRatioW = Math.min(100, Math.max(0, usg.cache_hit_pct || 0)).toFixed(1);
         panUsg.innerHTML = `
             <div class="agy-eyebrow-row">
-                <span class="agy-eyebrow-title">Token 用量 · Usage</span>
+                <span class="agy-eyebrow-title">${zh ? 'Token 用量' : 'Token Usage'}</span>
                 <div class="agy-eyebrow-actions">
                     <span class="agy-tag mono">${window.__fmtTok(usg.total_tokens || 0)}</span>
                     ${modeBadgeHtml}
                 </div>
             </div>
             <div class="pro-only">
-                <div class="agy-bar-track" title="缓存读取占比 ${cacheRatioW}%">
+                <div class="agy-bar-track" title="${zh ? `缓存读取占比 ${cacheRatioW}%` : `Cache hit ratio ${cacheRatioW}%`}">
                     <div class="agy-bar-seg" style="width:${cacheRatioW}%;background:var(--c-purple)"></div>
                     <div class="agy-bar-seg" style="width:${(100 - parseFloat(cacheRatioW)).toFixed(1)}%;background:var(--c-blue)"></div>
                 </div>
             </div>
             <div class="agy-hud-list">
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-blue)"></span>输入 (未缓存)</span>
+                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-blue)"></span>${zh ? '输入 (未缓存)' : 'Input (Uncached)'}</span>
                     <span class="agy-hud-val">${window.__fmtTok(usg.uncached_input_tokens)}</span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-purple)"></span>缓存命中</span>
+                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-purple)"></span>${zh ? '缓存命中' : 'Cache Read'}</span>
                     <span class="agy-hud-val">${window.__fmtTok(usg.cache_read_tokens)} <span class="sub">(${(usg.cache_hit_pct || 0).toFixed(1)}%)</span></span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-amber)"></span>输出总计</span>
-                    <span class="agy-hud-val">${window.__fmtTok(usg.output_tokens)} <span class="sub pro-only">(思考 ${window.__fmtTok(usg.thinking_output_tokens)})</span></span>
+                    <span class="agy-hud-label"><span class="agy-hud-dot pro-only" style="background:var(--c-amber)"></span>${zh ? '输出总计' : 'Total Output'}</span>
+                    <span class="agy-hud-val">${window.__fmtTok(usg.output_tokens)} <span class="sub pro-only">(${zh ? '思考' : 'think'} ${window.__fmtTok(usg.thinking_output_tokens)})</span></span>
                 </div>
             </div>
             <div class="agy-usage-block pro-only">
                 <div class="agy-usage-left">
-                    <span class="agy-usage-title">会话等价 API 成本</span>
-                    <span class="agy-usage-sub">按官方 Token 定价折算</span>
+                    <span class="agy-usage-title">${zh ? '会话等价 API 成本' : 'Est. API Cost'}</span>
+                    <span class="agy-usage-sub">${zh ? '按官方 Token 定价折算' : 'Based on standard pricing'}</span>
                 </div>
                 <div class="agy-usage-right">
                     <span class="agy-usage-stat">$${(usg.equivalent_cost_usd || 0).toFixed(2)} USD</span>
-                    <span class="agy-usage-sub">本轮命中 ${(usg.last_cache_hit_pct || 0).toFixed(1)}%</span>
+                    <span class="agy-usage-sub">${zh ? '本轮命中' : 'Last hit'} ${(usg.last_cache_hit_pct || 0).toFixed(1)}%</span>
                 </div>
             </div>
         `;
@@ -809,14 +823,14 @@ SETUP_JS = r"""
 
         panCtx.innerHTML = `
             <div class="agy-eyebrow-row">
-                <span class="agy-eyebrow-title">上下文容量 · Context</span>
+                <span class="agy-eyebrow-title">${zh ? '上下文容量' : 'Context'}</span>
                 <div class="agy-eyebrow-actions">
-                    <span class="agy-tag">${(data.model || data.model_label || 'Model').replace(/\s*\(.*?\)/g, '')}</span>
+                    <span class="agy-tag" title="${data.model || 'Model'}">${data.model || data.model_label || 'Model'}</span>
                     ${modeBadgeHtml}
                 </div>
             </div>
             <div class="agy-sec-head">
-                <span class="agy-sec-title">已用 ${usedPct.toFixed(1)}%</span>
+                <span class="agy-sec-title">${zh ? '已用' : 'Used'} ${usedPct.toFixed(1)}%</span>
                 <span class="agy-sec-sub">~${window.__fmtTok(ctx.used_tokens)} / ${window.__fmtTok(ctx.max_tokens)}</span>
             </div>
             <div class="agy-bar-track">
@@ -827,37 +841,37 @@ SETUP_JS = r"""
             </div>
             <div class="agy-hud-list">
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-blue)"></span>对话消息</span>
+                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-blue)"></span>${zh ? '对话消息' : 'Messages'}</span>
                     <span class="agy-hud-val">~${window.__fmtTok(msgC.tokens)} <span class="sub">(${(msgC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-purple)"></span>系统工具</span>
+                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-purple)"></span>${zh ? '系统工具' : 'System Tools'}</span>
                     <span class="agy-hud-val">~${window.__fmtTok(toolC.tokens)} <span class="sub">(${(toolC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-amber)"></span>技能 (Skills)</span>
+                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-amber)"></span>${zh ? '技能' : 'Skills'}</span>
                     <span class="agy-hud-val">~${window.__fmtTok(skillC.tokens)} <span class="sub">(${(skillC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--hud-muted)"></span>系统提示词</span>
+                    <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--hud-muted)"></span>${zh ? '系统提示词' : 'System Prompt'}</span>
                     <span class="agy-hud-val">~${window.__fmtTok(sysC.tokens)} <span class="sub">(${(sysC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
             </div>
             <div class="min-only">
                 <div class="agy-hud-divider"></div>
                 <div class="agy-hud-row">
-                    <span class="agy-hud-label">平均缓存命中率</span>
+                    <span class="agy-hud-label">${zh ? '平均缓存命中率' : 'Avg Cache Hit'}</span>
                     <span class="agy-hud-val">${(ctx.avg_cache_hit_pct || 0).toFixed(1)}%</span>
                 </div>
             </div>
             <div class="agy-usage-block pro-only">
                 <div class="agy-usage-left">
-                    <span class="agy-usage-title">256K 自动压缩水位</span>
-                    <span class="agy-usage-sub">距触发还剩 ~${window.__fmtTok(remainToComp)} · 已自动压缩 ${act.compaction_count || 0} 次</span>
+                    <span class="agy-usage-title">${zh ? '256K 自动压缩水位' : '256K Auto-Compaction'}</span>
+                    <span class="agy-usage-sub">${zh ? `距触发还剩 ~${window.__fmtTok(remainToComp)} · 已自动压缩 ${act.compaction_count || 0} 次` : `~${window.__fmtTok(remainToComp)} left · Compacted ${act.compaction_count || 0}x`}</span>
                 </div>
                 <div class="agy-usage-right">
                     <span class="agy-usage-stat">${compressPct.toFixed(0)}% ${compRingSvg}</span>
-                    <span class="agy-usage-sub">缓存命中 ${(ctx.avg_cache_hit_pct || 0).toFixed(1)}%</span>
+                    <span class="agy-usage-sub">${zh ? '缓存命中' : 'Cache hit'} ${(ctx.avg_cache_hit_pct || 0).toFixed(1)}%</span>
                 </div>
             </div>
         `;
@@ -967,6 +981,7 @@ def connect_workbench_cdp():
 
 def run_sync_loop():
     import importlib
+    global SETUP_JS
 
     save_ls_env("starting")
     ws = None
@@ -977,6 +992,16 @@ def run_sync_loop():
 
     while True:
         try:
+            cur_own_mtime = Path(__file__).stat().st_mtime
+            if cur_own_mtime != own_mtime:
+                own_mtime = cur_own_mtime
+                src = Path(__file__).read_text(encoding="utf-8")
+                if 'SETUP_JS = r"""' in src:
+                    SETUP_JS = src.split('SETUP_JS = r"""', 1)[1].split('"""', 1)[0]
+                    for sid, _ in sessions:
+                        if ws:
+                            ws.eval_js(SETUP_JS, msg_id, sid)
+                            msg_id += 1
             cur_gen_mtime = Path(generate_monitor.__file__).stat().st_mtime
             if cur_gen_mtime != gen_mtime:
                 gen_mtime = cur_gen_mtime
@@ -999,7 +1024,7 @@ def run_sync_loop():
             if data:
                 payload = json.dumps(data, ensure_ascii=False)
                 js_call = (
-                    f"(window.__AGY_PULSE_VERSION === '3.7' && typeof window.__updateAntigravityGauge === 'function') "
+                    f"(window.__AGY_PULSE_VERSION === '3.9' && typeof window.__updateAntigravityGauge === 'function') "
                     f"? window.__updateAntigravityGauge({payload}) : 'NEED_SETUP'"
                 )
                 results = []
