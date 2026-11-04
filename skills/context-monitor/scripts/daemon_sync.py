@@ -49,7 +49,7 @@ def save_ls_env(status: str = "init", error: str = ""):
         payload = {
             "address": addr or existing.get("address", ""),
             "csrf": csrf or existing.get("csrf", ""),
-            "pulse_version": "3.3",
+            "pulse_version": "3.4",
             "status": status,
             "error": error,
             "updated_at": time.strftime("%H:%M:%S"),
@@ -160,9 +160,31 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '3.3';
+    window.__AGY_PULSE_VERSION = '3.4';
 
-    // Always remove old style AND old DOM container so hot-reload cleanly re-binds all events
+    // 1. Clean up and neutralize any legacy v1/v2 ('dsh-*' / 'antigravity-context-gauge-*') DOM elements, styles, and intervals
+    const cleanupLegacy = () => {
+        if (window.__agyGaugeObserver && typeof window.__agyGaugeObserver.disconnect === 'function') {
+            try { window.__agyGaugeObserver.disconnect(); } catch (_) {}
+        }
+        document.querySelectorAll(
+            '#antigravity-context-gauge-style, .dsh-stat-popover, [id^="dsh-"]'
+        ).forEach(el => el.remove());
+        const oldRoot = document.getElementById('antigravity-context-gauge-root');
+        if (oldRoot) {
+            oldRoot.className = '';
+            oldRoot.innerHTML = '';
+            oldRoot.style.cssText = 'display:none !important; width:0 !important; height:0 !important; overflow:hidden !important; position:absolute !important; pointer-events:none !important;';
+        }
+        document.querySelectorAll('style').forEach(st => {
+            if (st.id !== 'agy-ctx-hud-style' && /dsh-dock-bar|antigravity-context-gauge|dsh-stat-popover/.test(st.textContent || '')) {
+                st.remove();
+            }
+        });
+    };
+    cleanupLegacy();
+
+    // 2. Always remove old v3 style AND old v3 DOM container so hot-reload cleanly re-binds all events
     const oldStyle = document.getElementById('agy-ctx-hud-style');
     if (oldStyle) oldStyle.remove();
     const oldGauge = document.getElementById('agy-ctx-gauge');
@@ -464,6 +486,14 @@ SETUP_JS = r"""
         #agy-ctx-gauge[data-mode="pro"] .min-only {
             display: none !important;
         }
+        #antigravity-context-gauge-root,
+        .dsh-dock-bar,
+        .dsh-stat-popover,
+        [id^="dsh-"] {
+            display: none !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+        }
     `;
     document.head.appendChild(style);
 
@@ -529,6 +559,7 @@ SETUP_JS = r"""
     }
 
     window.__updateAntigravityGauge = (data) => {
+        cleanupLegacy();
         window.__lastAgyPulseData = data;
         const allBtns = Array.from(document.querySelectorAll('button'));
         const modelBtn = allBtns.find(b =>
@@ -919,6 +950,11 @@ def run_sync_loop():
 
     while True:
         try:
+            if Path(__file__).stat().st_mtime != own_mtime:
+                if ws:
+                    ws.close()
+                _lock_socket.close()
+                sys.exit(0)
             cur_gen_mtime = Path(generate_monitor.__file__).stat().st_mtime
             if cur_gen_mtime != gen_mtime:
                 gen_mtime = cur_gen_mtime
@@ -941,7 +977,7 @@ def run_sync_loop():
             if data:
                 payload = json.dumps(data, ensure_ascii=False)
                 js_call = (
-                    f"(window.__AGY_PULSE_VERSION === '3.3' && typeof window.__updateAntigravityGauge === 'function') "
+                    f"(window.__AGY_PULSE_VERSION === '3.4' && typeof window.__updateAntigravityGauge === 'function') "
                     f"? window.__updateAntigravityGauge({payload}) : 'NEED_SETUP'"
                 )
                 results = []
@@ -961,7 +997,17 @@ def run_sync_loop():
                         val = resp2.get("result", {}).get("result", {}).get("value")
                         if val is None:
                             val = f"raw:{str(resp2)[:100]}"
-                    results.append(f"{uprefix[-15:]}={val}")
+                    # Also inspect actual DOM in toolbarRight
+                    dom_probe = ws.eval_js(
+                        "(() => { const g = document.getElementById('agy-ctx-gauge'); if (!g) return 'NO_G'; const bar = g.parentElement?.parentElement || g.parentElement; const allAgy = Array.from(document.querySelectorAll('[id*=\"agy\"],[id*=\"ctx\"],[class*=\"dsh\"],iframe')).map(e => e.tagName + '#' + e.id + '.' + e.className + ':' + (e.src || e.innerText?.slice(0,30)?.replace(/\\n+/g,' '))); return JSON.stringify({bar_text: bar?.innerText?.replace(/\\n+/g,'|'), allAgy}); })()",
+                        msg_id,
+                        sid,
+                    )
+                    msg_id += 1
+                    probe_val = (
+                        dom_probe.get("result", {}).get("result", {}).get("value", "")
+                    )
+                    results.append(f"{uprefix[-15:]}={val} dom={probe_val}")
                 save_ls_env(f"injected:{','.join(results)}", dbg_err)
             else:
                 save_ls_env("no_session_data")
