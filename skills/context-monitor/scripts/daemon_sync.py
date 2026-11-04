@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Antigravity Pulse — Native Telemetry HUD Daemon (v3.0)
+Antigravity Pulse — Native Telemetry HUD Daemon (v3.1)
 - Zero redundant Quota UI (Antigravity 2.0 provides official 'View Usage')
 - 1:1 Visual Alignment with Antigravity's Native 'Model / View Usage' Popover Style
 - Dual-UI Mode Switcher: Minimal (极简模式) ⇄ Pro (详细模式)
-  - Right-click any bottom pill OR click the [极简 | 详细] badge in the popover header
+  - Click the [极简 | 详细] toggle button in the top-right of any popover
+  - OR right-click any bottom pill
   - Saved in localStorage ('agy_pulse_mode')
 - Automatic Light / Dark / Custom Theme Adaptation via Antigravity CSS Tokens
 """
@@ -33,19 +34,29 @@ except OSError:
     sys.exit(0)
 
 
-def save_ls_env():
+def save_ls_env(status: str = "init", error: str = ""):
     """Persist live Antigravity Language Server address and CSRF token for standalone CLI queries."""
     addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "")
     csrf = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
-    if addr and csrf:
-        env_file = PLUGIN_ROOT / ".ls_env.json"
-        try:
-            env_file.write_text(
-                json.dumps({"address": addr, "csrf": csrf, "pulse_version": "3.0"}),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+    env_file = PLUGIN_ROOT / ".ls_env.json"
+    try:
+        existing = {}
+        if env_file.exists():
+            try:
+                existing = json.loads(env_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        payload = {
+            "address": addr or existing.get("address", ""),
+            "csrf": csrf or existing.get("csrf", ""),
+            "pulse_version": "3.1",
+            "status": status,
+            "error": error,
+            "updated_at": time.strftime("%H:%M:%S"),
+        }
+        env_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 class SimpleWebSocket:
@@ -115,16 +126,25 @@ class SimpleWebSocket:
                 payload[i] ^= mask_key[i % 4]
         return payload.decode("utf-8", errors="replace")
 
-    def eval_js(self, expression: str, msg_id: int = 1):
-        self.send_text(
-            json.dumps(
-                {
-                    "id": msg_id,
-                    "method": "Runtime.evaluate",
-                    "params": {"expression": expression, "returnByValue": True},
-                }
-            )
-        )
+    def eval_js(self, expression: str, msg_id: int = 1, session_id: str = ""):
+        req = {
+            "id": msg_id,
+            "method": "Runtime.evaluate",
+            "params": {"expression": expression, "returnByValue": True},
+        }
+        if session_id:
+            req["sessionId"] = session_id
+        self.send_text(json.dumps(req))
+        while True:
+            resp = json.loads(self.recv_text())
+            if resp.get("id") == msg_id:
+                return resp
+
+    def call_cdp(self, method: str, params: dict = None, msg_id: int = 1):
+        req = {"id": msg_id, "method": method}
+        if params:
+            req["params"] = params
+        self.send_text(json.dumps(req))
         while True:
             resp = json.loads(self.recv_text())
             if resp.get("id") == msg_id:
@@ -140,10 +160,13 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '3.0';
+    window.__AGY_PULSE_VERSION = '3.2';
 
+    // Always remove old style AND old DOM container so hot-reload cleanly re-binds all events
     const oldStyle = document.getElementById('agy-ctx-hud-style');
     if (oldStyle) oldStyle.remove();
+    const oldGauge = document.getElementById('agy-ctx-gauge');
+    if (oldGauge) oldGauge.remove();
 
     const style = document.createElement('style');
     style.id = 'agy-ctx-hud-style';
@@ -192,7 +215,6 @@ SETUP_JS = r"""
             transition: all 0.14s ease;
             white-space: nowrap;
         }
-        /* Pro mode subtle pill background */
         #agy-ctx-gauge[data-mode="pro"] .agy-hud-pill {
             background: color-mix(in srgb, var(--hud-well) 45%, transparent);
         }
@@ -216,13 +238,36 @@ SETUP_JS = r"""
             font-variant-numeric: tabular-nums;
             letter-spacing: -0.02em;
         }
+        .agy-hud-mode-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            height: 20px;
+            padding: 0 6px;
+            margin-left: 2px;
+            border-radius: 999px;
+            border: 1px solid var(--hud-border);
+            background: var(--hud-well);
+            color: var(--hud-muted);
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.14s ease;
+            white-space: nowrap;
+        }
+        .agy-hud-mode-btn:hover {
+            background: var(--hud-hover-bg);
+            color: var(--hud-fg);
+            border-color: var(--hud-muted);
+        }
 
         /* Native Antigravity Menu Popover Card (1:1 aligned with 'Model / View Usage') */
         .agy-hud-popover {
             position: absolute;
             bottom: calc(100% + 8px);
             right: 0;
-            width: 288px;
+            width: 292px;
             padding: 12px 14px;
             border-radius: 10px;
             background: var(--hud-bg);
@@ -267,7 +312,7 @@ SETUP_JS = r"""
         .agy-eyebrow-actions {
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            gap: 5px;
         }
 
         /* Official Rounded Muted Pill Badge (like 'New' / 'Fast' / 'Notice') */
@@ -290,12 +335,13 @@ SETUP_JS = r"""
         }
         .agy-mode-switch {
             cursor: pointer;
-            border: 1px solid transparent;
+            border: 1px solid var(--hud-border);
+            padding: 1.5px 7px;
             transition: all 0.12s ease;
             user-select: none;
         }
         .agy-mode-switch:hover {
-            border-color: var(--hud-border);
+            background: var(--hud-hover-bg);
             color: var(--hud-fg);
         }
         .agy-mode-switch .active-mode {
@@ -489,17 +535,21 @@ SETUP_JS = r"""
         if (window.__lastAgyPulseData) {
             window.__updateAntigravityGauge(window.__lastAgyPulseData);
         }
+        return false;
     };
 
-    document.addEventListener('click', (e) => {
-        const g = document.getElementById('agy-ctx-gauge');
-        if (g && !g.contains(e.target)) {
-            window.__agyPinned = false;
-            window.__agyActiveTab = null;
-            g.classList.remove('open');
-            g.querySelectorAll('.agy-hud-pill').forEach(b => b.classList.remove('active'));
-        }
-    });
+    if (!window.__agyDocClickBound) {
+        window.__agyDocClickBound = true;
+        document.addEventListener('click', (e) => {
+            const g = document.getElementById('agy-ctx-gauge');
+            if (g && !g.contains(e.target)) {
+                window.__agyPinned = false;
+                window.__agyActiveTab = null;
+                g.classList.remove('open');
+                g.querySelectorAll('.agy-hud-pill').forEach(b => b.classList.remove('active'));
+            }
+        });
+    }
 
     window.__updateAntigravityGauge = (data) => {
         window.__lastAgyPulseData = data;
@@ -521,9 +571,10 @@ SETUP_JS = r"""
             g = document.createElement('div');
             g.id = 'agy-ctx-gauge';
             g.innerHTML = `
-                <div class="agy-hud-pill" data-tab="activity" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
-                <div class="agy-hud-pill" data-tab="usage" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
-                <div class="agy-hud-pill" data-tab="context" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
+                <div class="agy-hud-pill" data-tab="activity" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
+                <div class="agy-hud-pill" data-tab="usage" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
+                <div class="agy-hud-pill" data-tab="context" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
+                <div class="agy-hud-mode-btn" onclick="return window.__toggleAgyPulseMode(event)" title="点击切换 [极简 / 详细] UI 模式"></div>
                 <div class="agy-hud-popover">
                     <div class="agy-hud-panel" data-panel="activity"></div>
                     <div class="agy-hud-panel" data-panel="usage"></div>
@@ -560,9 +611,6 @@ SETUP_JS = r"""
                         switchTab(tab);
                     }
                 });
-                pill.addEventListener('contextmenu', (e) => {
-                    window.__toggleAgyPulseMode(e);
-                });
             });
 
             g.addEventListener('mouseleave', () => {
@@ -572,24 +620,22 @@ SETUP_JS = r"""
                     g.querySelectorAll('.agy-hud-pill').forEach(p => p.classList.remove('active'));
                 }
             });
-
-            g.querySelector('.agy-hud-popover').addEventListener('click', (e) => {
-                const sw = e.target.closest('.agy-mode-switch');
-                if (sw) {
-                    window.__toggleAgyPulseMode(e);
-                }
-            });
         }
 
         const mode = window.__agyPulseMode || 'minimal';
         g.dataset.mode = mode;
+
+        const modeBtn = g.querySelector('.agy-hud-mode-btn');
+        if (modeBtn) {
+            modeBtn.innerHTML = `<span style="opacity:0.7">⇄</span><span>${mode === 'pro' ? '详细' : '极简'}</span>`;
+        }
 
         const act = data.activity || {};
         const usg = data.usage || {};
         const ctx = data.context_meter || {};
 
         const modeBadgeHtml = `
-            <span class="agy-tag agy-mode-switch" title="点击或右键胶囊切换 UI 模式">
+            <span class="agy-tag agy-mode-switch" onclick="return window.__toggleAgyPulseMode(event)" title="点击切换 [极简 / 详细] 模式">
                 <span class="${mode === 'minimal' ? 'active-mode' : ''}">极简</span>
                 <span style="opacity:0.35">|</span>
                 <span class="${mode === 'pro' ? 'active-mode' : ''}">详细</span>
@@ -716,15 +762,16 @@ SETUP_JS = r"""
         // Panel 3: Context Window
         const panCtx = g.querySelector('[data-panel="context"]');
         const cats = ctx.categories || {};
-        const sysC = cats.system || { tokens: 0, pct_of_max: 0, pct_of_used: 0 };
-        const toolC = cats.tools || { tokens: 0, pct_of_max: 0, pct_of_used: 0 };
-        const skillC = cats.skills || { tokens: 0, pct_of_max: 0, pct_of_used: 0 };
-        const msgC = cats.messages || { tokens: 0, pct_of_max: 0, pct_of_used: 0 };
+        const sysC = cats.system || { tokens: 0, pct: 0 };
+        const toolC = cats.tools || { tokens: 0, pct: 0 };
+        const skillC = cats.skills || { tokens: 0, pct: 0 };
+        const msgC = cats.messages || { tokens: 0, pct: 0 };
 
-        const wSys = Math.max(0.4, sysC.pct_of_max || 0).toFixed(2);
-        const wTool = Math.max(0.3, toolC.pct_of_max || 0).toFixed(2);
-        const wSkill = Math.max(0.2, skillC.pct_of_max || 0).toFixed(2);
-        const wMsg = Math.max(0.8, msgC.pct_of_max || 0).toFixed(2);
+        const maxTok = Math.max(1, ctx.max_tokens || 1048576);
+        const wSys = Math.max(0.4, ((sysC.tokens || 0) / maxTok) * 100).toFixed(2);
+        const wTool = Math.max(0.3, ((toolC.tokens || 0) / maxTok) * 100).toFixed(2);
+        const wSkill = Math.max(0.2, ((skillC.tokens || 0) / maxTok) * 100).toFixed(2);
+        const wMsg = Math.max(0.8, ((msgC.tokens || 0) / maxTok) * 100).toFixed(2);
 
         const compressPct = Math.min(100, ctx.compress_pct || 0);
         const compRingColor = compressPct >= 85 ? 'var(--c-amber)' : 'var(--c-green)';
@@ -752,19 +799,19 @@ SETUP_JS = r"""
             <div class="agy-hud-list">
                 <div class="agy-hud-row">
                     <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-blue)"></span>对话消息</span>
-                    <span class="agy-hud-val">~${window.__fmtTok(msgC.tokens)} <span class="sub">(${msgC.pct_of_used.toFixed(1)}%)</span></span>
+                    <span class="agy-hud-val">~${window.__fmtTok(msgC.tokens)} <span class="sub">(${(msgC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
                 <div class="agy-hud-row">
                     <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-purple)"></span>系统工具</span>
-                    <span class="agy-hud-val">~${window.__fmtTok(toolC.tokens)} <span class="sub">(${toolC.pct_of_used.toFixed(1)}%)</span></span>
+                    <span class="agy-hud-val">~${window.__fmtTok(toolC.tokens)} <span class="sub">(${(toolC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
                 <div class="agy-hud-row">
                     <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--c-amber)"></span>技能 (Skills)</span>
-                    <span class="agy-hud-val">~${window.__fmtTok(skillC.tokens)} <span class="sub">(${skillC.pct_of_used.toFixed(1)}%)</span></span>
+                    <span class="agy-hud-val">~${window.__fmtTok(skillC.tokens)} <span class="sub">(${(skillC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
                 <div class="agy-hud-row">
                     <span class="agy-hud-label"><span class="agy-hud-sq" style="background:var(--hud-muted)"></span>系统提示词</span>
-                    <span class="agy-hud-val">~${window.__fmtTok(sysC.tokens)} <span class="sub">(${sysC.pct_of_used.toFixed(1)}%)</span></span>
+                    <span class="agy-hud-val">~${window.__fmtTok(sysC.tokens)} <span class="sub">(${(sysC.pct || 0).toFixed(1)}%)</span></span>
                 </div>
             </div>
             <div class="min-only">
@@ -788,76 +835,171 @@ SETUP_JS = r"""
 
         return true;
     };
-    return 'READY_V3';
+    return 'READY_V3_1';
 })()
 """
 
 
-def find_target_ws_url() -> str:
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        req = opener.open("http://127.0.0.1:9223/json/list", timeout=1.5)
-        targets = json.loads(req.read().decode("utf-8"))
-        for t in targets:
-            if t.get("type") == "page" and "workbench.html" in t.get("url", ""):
-                return t.get("webSocketDebuggerUrl", "")
-    except Exception:
-        pass
-    return ""
+def get_devtools_active_port_info():
+    candidates = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / "Antigravity" / "DevToolsActivePort")
+    home = Path.home()
+    candidates.extend(
+        [
+            home / "AppData" / "Roaming" / "Antigravity" / "DevToolsActivePort",
+            home
+            / "Library"
+            / "Application Support"
+            / "Antigravity"
+            / "DevToolsActivePort",
+            home / ".config" / "Antigravity" / "DevToolsActivePort",
+        ]
+    )
+    for p in candidates:
+        try:
+            if p.exists():
+                lines = (
+                    p.read_text(encoding="utf-8", errors="ignore").strip().splitlines()
+                )
+                if len(lines) >= 2 and lines[0].strip().isdigit():
+                    return int(lines[0].strip()), lines[1].strip()
+        except Exception:
+            pass
+    return None, None
+
+
+def connect_workbench_cdp():
+    """Return (ws, session_id, msg_id, debug_err) connected to the active workbench.html page."""
+    msg_id = 1
+    errs = []
+    # 1. Try native Electron DevToolsActivePort browser websocket first
+    port, browser_path = get_devtools_active_port_info()
+    if port and browser_path:
+        try:
+            ws = SimpleWebSocket(f"ws://127.0.0.1:{port}{browser_path}")
+            ws.connect()
+            resp = ws.call_cdp("Target.getTargets", {}, msg_id)
+            msg_id += 1
+            targets = resp.get("result", {}).get("targetInfos", [])
+            summary = [
+                f"{t.get('type')}|{t.get('title','')[:18]}|{t.get('url','')[:40]}"
+                for t in targets
+            ]
+            # Attach to all non-blank page targets
+            sessions = []
+            for t in targets:
+                u = t.get("url", "")
+                if t.get("type") == "page" and (
+                    u
+                    and not u.startswith("data:")
+                    and not u.startswith("devtools:")
+                    and not u.startswith("about:")
+                ):
+                    tid = t.get("targetId")
+                    att = ws.call_cdp(
+                        "Target.attachToTarget",
+                        {"targetId": tid, "flatten": True},
+                        msg_id,
+                    )
+                    msg_id += 1
+                    sid = att.get("result", {}).get("sessionId", "")
+                    if sid:
+                        sessions.append((sid, u[:40]))
+            if sessions:
+                return ws, sessions, msg_id, f"targets={summary}"
+            errs.append(f"targets={summary}")
+            ws.close()
+        except Exception as e:
+            errs.append(f"ws({port}):{e}")
+    else:
+        errs.append(f"no_active_port({port},{browser_path})")
+
+    # 2. Fallback to HTTP /json/list on candidate ports
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    ports = [p for p in ([port] if port else []) + [9223, 9222] if p]
+    for pt in ports:
+        try:
+            req = opener.open(f"http://127.0.0.1:{pt}/json/list", timeout=1.5)
+            targets = json.loads(req.read().decode("utf-8"))
+            for t in targets:
+                if t.get("type") == "page" and "workbench.html" in t.get("url", ""):
+                    ws_url = t.get("webSocketDebuggerUrl", "")
+                    if ws_url:
+                        ws = SimpleWebSocket(ws_url)
+                        ws.connect()
+                        return ws, [("", "http_ws")], msg_id, ""
+        except Exception as e:
+            errs.append(f"http({pt}):{e}")
+            continue
+    return None, [], msg_id, "; ".join(errs)
 
 
 def run_sync_loop():
-    save_ls_env()
+    import importlib
+
+    save_ls_env("starting")
     ws = None
+    sessions = []
     msg_id = 1
     own_mtime = Path(__file__).stat().st_mtime
     gen_mtime = Path(generate_monitor.__file__).stat().st_mtime
 
     while True:
-        # Auto-reload when script files are updated on disk
         try:
-            if (
-                Path(__file__).stat().st_mtime != own_mtime
-                or Path(generate_monitor.__file__).stat().st_mtime != gen_mtime
-            ):
-                if ws:
-                    ws.close()
-                _lock_socket.close()
-                sys.exit(0)
+            cur_gen_mtime = Path(generate_monitor.__file__).stat().st_mtime
+            if cur_gen_mtime != gen_mtime:
+                gen_mtime = cur_gen_mtime
+                importlib.reload(generate_monitor)
         except Exception:
             pass
 
         try:
-            save_ls_env()
             if ws is None:
-                ws_url = find_target_ws_url()
-                if not ws_url:
+                ws, sessions, msg_id, dbg_err = connect_workbench_cdp()
+                if ws is None or not sessions:
+                    save_ls_env("no_cdp_ws", dbg_err)
                     time.sleep(2.0)
                     continue
-                ws = SimpleWebSocket(ws_url)
-                ws.connect()
-                ws.eval_js(SETUP_JS, msg_id)
-                msg_id += 1
+                for sid, _ in sessions:
+                    ws.eval_js(SETUP_JS, msg_id, sid)
+                    msg_id += 1
 
             data = generate_monitor.analyze_session()
             if data:
                 payload = json.dumps(data, ensure_ascii=False)
                 js_call = (
-                    f"(window.__AGY_PULSE_VERSION === '3.0' && typeof window.__updateAntigravityGauge === 'function') "
+                    f"(window.__AGY_PULSE_VERSION === '3.2' && typeof window.__updateAntigravityGauge === 'function') "
                     f"? window.__updateAntigravityGauge({payload}) : 'NEED_SETUP'"
                 )
-                resp = ws.eval_js(js_call, msg_id)
-                msg_id += 1
-                val = resp.get("result", {}).get("result", {}).get("value")
-                if val == "NEED_SETUP":
-                    ws.eval_js(SETUP_JS, msg_id)
+                results = []
+                for sid, uprefix in sessions:
+                    resp = ws.eval_js(js_call, msg_id, sid)
                     msg_id += 1
-                    ws.eval_js(f"window.__updateAntigravityGauge({payload})", msg_id)
-                    msg_id += 1
-        except Exception:
+                    val = resp.get("result", {}).get("result", {}).get("value")
+                    if val == "NEED_SETUP" or val is None:
+                        s_resp = ws.eval_js(SETUP_JS, msg_id, sid)
+                        msg_id += 1
+                        resp2 = ws.eval_js(
+                            f"window.__updateAntigravityGauge({payload})",
+                            msg_id,
+                            sid,
+                        )
+                        msg_id += 1
+                        val = resp2.get("result", {}).get("result", {}).get("value")
+                        if val is None:
+                            val = f"raw:{str(resp2)[:100]}"
+                    results.append(f"{uprefix[-15:]}={val}")
+                save_ls_env(f"injected:{','.join(results)}", dbg_err)
+            else:
+                save_ls_env("no_session_data")
+        except Exception as e:
+            save_ls_env("exception", str(e))
             if ws:
                 ws.close()
                 ws = None
+                sessions = []
 
         time.sleep(1.5)
 
