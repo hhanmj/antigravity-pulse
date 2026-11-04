@@ -164,7 +164,7 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '3.6';
+    window.__AGY_PULSE_VERSION = '3.7';
 
     // 1. Clean up and neutralize any legacy v1/v2 ('dsh-*' / 'antigravity-context-gauge-*') DOM elements, styles, and intervals
     const cleanupLegacy = () => {
@@ -219,7 +219,8 @@ SETUP_JS = r"""
             flex-wrap: nowrap;
             flex-shrink: 0;
             gap: 2px;
-            margin-left: 4px;
+            margin-left: auto;
+            margin-right: 6px;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
             user-select: none;
             z-index: 999;
@@ -572,24 +573,36 @@ SETUP_JS = r"""
     window.__updateAntigravityGauge = (data) => {
         cleanupLegacy();
         window.__lastAgyPulseData = data;
-        const allBtns = Array.from(document.querySelectorAll('button'));
-        const modelBtn = allBtns.find(b =>
-            /Gemini|Claude|GPT|Argon|Sonnet|Opus|Flash/i.test(b.textContent || '') &&
-            b.offsetParent !== null
-        );
-        if (!modelBtn) return false;
 
-        let toolbarRight = modelBtn.parentElement;
-        if (toolbarRight && toolbarRight.parentElement && toolbarRight.parentElement.children.length >= 2) {
-            toolbarRight = toolbarRight.parentElement;
+        // Locate microphone / action button container on the right side of the chat input bar
+        let micBtn = document.querySelector('button[data-tooltip-id="input-send-button-record-tooltip"]') ||
+                     document.querySelector('button[data-tooltip-id="input-send-button-cancel-tooltip"]');
+        if (!micBtn) {
+            const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
+                if (b.closest('nav, aside, [class*="sidebar"]')) return false;
+                const tip = b.getAttribute('data-tooltip-id') || '';
+                const aria = b.getAttribute('aria-label') || '';
+                return tip.includes('record') || aria.includes('录音') || aria.includes('Record');
+            });
+            if (candidates.length > 0) micBtn = candidates[candidates.length - 1];
         }
-        if (!toolbarRight) return false;
-        toolbarRight.style.position = 'relative';
-        toolbarRight.style.zIndex = '100';
-        toolbarRight.style.flexWrap = 'nowrap';
+        if (!micBtn || micBtn.closest('nav, aside, [class*="sidebar"]')) return false;
+
+        const micContainer = micBtn.closest('.flex.items-center');
+        if (!micContainer || !micContainer.parentElement || micContainer.closest('nav, aside, [class*="sidebar"]')) return false;
+
+        const hostBar = micContainer.parentElement;
+        hostBar.style.position = 'relative';
+        hostBar.style.zIndex = '100';
+        const formBox = hostBar.closest('form') || hostBar.parentElement?.parentElement;
+        if (formBox) {
+            formBox.style.position = 'relative';
+            formBox.style.zIndex = '100';
+        }
 
         let g = document.getElementById('agy-ctx-gauge');
-        if (!g) {
+        if (!g || g.parentElement !== hostBar) {
+            if (g) g.remove();
             g = document.createElement('div');
             g.id = 'agy-ctx-gauge';
             g.innerHTML = `
@@ -602,7 +615,7 @@ SETUP_JS = r"""
                     <div class="agy-hud-panel" data-panel="context"></div>
                 </div>
             `;
-            toolbarRight.appendChild(g);
+            hostBar.insertBefore(g, micContainer);
 
             const switchTab = (tabName) => {
                 window.__agyActiveTab = tabName;
@@ -798,7 +811,7 @@ SETUP_JS = r"""
             <div class="agy-eyebrow-row">
                 <span class="agy-eyebrow-title">上下文容量 · Context</span>
                 <div class="agy-eyebrow-actions">
-                    <span class="agy-tag">${(data.model || data.model_label || 'Model').replace(/\\s*\\(.*?\\)/g, '')}</span>
+                    <span class="agy-tag">${(data.model || data.model_label || 'Model').replace(/\s*\(.*?\)/g, '')}</span>
                     ${modeBadgeHtml}
                 </div>
             </div>
@@ -964,11 +977,6 @@ def run_sync_loop():
 
     while True:
         try:
-            if Path(__file__).stat().st_mtime != own_mtime:
-                if ws:
-                    ws.close()
-                _lock_socket.close()
-                sys.exit(0)
             cur_gen_mtime = Path(generate_monitor.__file__).stat().st_mtime
             if cur_gen_mtime != gen_mtime:
                 gen_mtime = cur_gen_mtime
@@ -991,7 +999,7 @@ def run_sync_loop():
             if data:
                 payload = json.dumps(data, ensure_ascii=False)
                 js_call = (
-                    f"(window.__AGY_PULSE_VERSION === '3.6' && typeof window.__updateAntigravityGauge === 'function') "
+                    f"(window.__AGY_PULSE_VERSION === '3.7' && typeof window.__updateAntigravityGauge === 'function') "
                     f"? window.__updateAntigravityGauge({payload}) : 'NEED_SETUP'"
                 )
                 results = []
