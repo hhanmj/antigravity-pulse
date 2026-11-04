@@ -1,0 +1,15 @@
+# Local runtime credentials & logs (NEVER commit)
+.ls_env.json
+daemon.log
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

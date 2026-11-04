@@ -1,0 +1,7 @@
+{
+  "name": "antigravity-pulse",
+  "version": "3.0.0",
+  "description": "Native bottom-bar telemetry HUD for Google Antigravity 2.0 — real-time token speed (TPS), prompt cache hit rate, 4-category context breakdown, 256K auto-compaction radar, and Minimal/Pro dual-UI switcher.",
+  "author": "hhanmj",
+  "repository": "https://github.com/hhanmj/antigravity-pulse.git"
+}

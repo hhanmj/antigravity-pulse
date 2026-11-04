@@ -1,0 +1,8 @@
+{
+  "command": "python",
+  "args": ["../../skills/context-monitor/scripts/daemon_sync.py"],
+  "restart_policy": "always",
+  "display_name": "Context Monitor Daemon",
+  "description": "Headless DeepSeek Harness bottom-bar context and token monitor daemon",
+  "has_web_ui": false
+}
