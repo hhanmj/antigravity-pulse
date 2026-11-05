@@ -49,7 +49,7 @@ def save_ls_env(status: str = "init", error: str = ""):
         payload = {
             "address": addr or existing.get("address", ""),
             "csrf": csrf or existing.get("csrf", ""),
-            "pulse_version": "3.4",
+            "pulse_version": "4.0",
             "status": status,
             "error": error,
             "updated_at": time.strftime("%H:%M:%S"),
@@ -164,7 +164,7 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '3.9';
+    window.__AGY_PULSE_VERSION = '4.0';
 
     // 1. Clean up and neutralize any legacy v1/v2 ('dsh-*' / 'antigravity-context-gauge-*') DOM elements, styles, and intervals
     const cleanupLegacy = () => {
@@ -553,6 +553,24 @@ SETUP_JS = r"""
     window.__agyActiveTab = null;
     window.__agyPinned = false;
     window.__agyPulseMode = localStorage.getItem('agy_pulse_mode') || 'minimal';
+    window.__agyConvCache = window.__agyConvCache || {};
+
+    window.__getAgyActiveConvId = () => {
+        const href = window.location.href || '';
+        const path = window.location.pathname || '';
+        const mUrl = (path + ' ' + href).match(/(?:\/c\/|conversationId=|cascadeId=)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
+        if (mUrl) return mUrl[1].toLowerCase();
+        const frames = document.querySelectorAll('iframe[src]');
+        for (const f of frames) {
+            if (f.offsetParent === null) continue;
+            const mFrame = (f.src || '').match(/(?:\/c\/|conversationId=|cascadeId=)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
+            if (mFrame) return mFrame[1].toLowerCase();
+        }
+        if (/^\/(c\/new|new)?\/?$/i.test(path) && /^https?:\/\//i.test(href)) {
+            return 'new';
+        }
+        return '';
+    };
 
     window.__toggleAgyPulseMode = (e) => {
         if (e) {
@@ -582,9 +600,47 @@ SETUP_JS = r"""
         });
     }
 
+    if (window.__agyRouteTimer) {
+        try { clearInterval(window.__agyRouteTimer); } catch (_) {}
+    }
+    window.__agyRouteTimer = setInterval(() => {
+        const curConv = window.__getAgyActiveConvId();
+        const g = document.getElementById('agy-ctx-gauge');
+        if (!curConv) return;
+        if (curConv !== window.__agyLastRenderedConvId || !g) {
+            const cached = window.__agyConvCache && window.__agyConvCache[curConv];
+            if (cached) {
+                window.__updateAntigravityGauge(cached);
+            } else {
+                window.__updateAntigravityGauge({
+                    conv_id: curConv,
+                    model: (window.__lastAgyPulseData && window.__lastAgyPulseData.model) || 'Model',
+                    activity: { turns: 0, steps: 0, decode_tps: 0, e2e_tps: 0, llm_time_sec: 0, tool_time_sec: 0, avg_ttft_sec: 0 },
+                    usage: { total_tokens: 0, cache_hit_pct: 0, last_cache_hit_pct: 0, uncached_input_tokens: 0, cache_read_tokens: 0, output_tokens: 0, thinking_output_tokens: 0, equivalent_cost_usd: 0 },
+                    context_meter: { used_tokens: 0, max_tokens: 1048576, compress_tokens: 256000, used_pct: 0, compress_pct: 0, avg_cache_hit_pct: 0, categories: {} }
+                });
+            }
+        }
+    }, 200);
+
     window.__updateAntigravityGauge = (data) => {
         cleanupLegacy();
+        if (!data) return false;
+        if (data.conv_id) {
+            window.__agyConvCache = window.__agyConvCache || {};
+            window.__agyConvCache[data.conv_id] = data;
+        }
+        const curConv = window.__getAgyActiveConvId();
+        if (curConv && data.conv_id && data.conv_id !== curConv) {
+            const cached = window.__agyConvCache[curConv];
+            if (cached) {
+                data = cached;
+            } else {
+                return 'CONV_MISMATCH:' + curConv;
+            }
+        }
         window.__lastAgyPulseData = data;
+        window.__agyLastRenderedConvId = data.conv_id || curConv || '';
 
         // Locate microphone / action button container on the right side of the chat input bar
         let micBtn = document.querySelector('button[data-tooltip-id="input-send-button-record-tooltip"]') ||
@@ -913,53 +969,81 @@ def get_devtools_active_port_info():
     return None, None
 
 
+import re
+
+UUID_RE = re.compile(
+    r"(?:/c/|conversationId=|cascadeId=)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
+def refresh_browser_sessions(ws: SimpleWebSocket, target_map: dict, msg_id: int):
+    """Discover new page targets and prune closed ones on the browser-level CDP WebSocket."""
+    resp = ws.call_cdp("Target.getTargets", {}, msg_id)
+    msg_id += 1
+    targets = resp.get("result", {}).get("targetInfos", [])
+    summary = [
+        f"{t.get('type')}|{t.get('title','')[:18]}|{t.get('url','')[:45]}"
+        for t in targets
+    ]
+    active_pages = []
+    seen_tids = set()
+    for t in targets:
+        u = t.get("url", "")
+        if t.get("type") == "page" and (
+            u
+            and not u.startswith("data:")
+            and not u.startswith("devtools:")
+            and not u.startswith("about:")
+        ):
+            tid = t.get("targetId", "")
+            if not tid:
+                continue
+            seen_tids.add(tid)
+            sid = target_map.get(tid, "")
+            if not sid:
+                att = ws.call_cdp(
+                    "Target.attachToTarget",
+                    {"targetId": tid, "flatten": True},
+                    msg_id,
+                )
+                msg_id += 1
+                sid = att.get("result", {}).get("sessionId", "")
+                if sid:
+                    target_map[tid] = sid
+                    ws.eval_js(SETUP_JS, msg_id, sid)
+                    msg_id += 1
+            if sid:
+                active_pages.append((tid, sid, u))
+
+    for old_tid in list(target_map.keys()):
+        if old_tid not in seen_tids:
+            target_map.pop(old_tid, None)
+
+    return active_pages, msg_id, f"targets={summary}"
+
+
 def connect_workbench_cdp():
-    """Return (ws, session_id, msg_id, debug_err) connected to the active workbench.html page."""
+    """Return (ws, is_browser_ws, target_map, active_pages, msg_id, debug_err)."""
     msg_id = 1
     errs = []
-    # 1. Try native Electron DevToolsActivePort browser websocket first
     port, browser_path = get_devtools_active_port_info()
     if port and browser_path:
         try:
             ws = SimpleWebSocket(f"ws://127.0.0.1:{port}{browser_path}")
             ws.connect()
-            resp = ws.call_cdp("Target.getTargets", {}, msg_id)
-            msg_id += 1
-            targets = resp.get("result", {}).get("targetInfos", [])
-            summary = [
-                f"{t.get('type')}|{t.get('title','')[:18]}|{t.get('url','')[:40]}"
-                for t in targets
-            ]
-            # Attach to all non-blank page targets
-            sessions = []
-            for t in targets:
-                u = t.get("url", "")
-                if t.get("type") == "page" and (
-                    u
-                    and not u.startswith("data:")
-                    and not u.startswith("devtools:")
-                    and not u.startswith("about:")
-                ):
-                    tid = t.get("targetId")
-                    att = ws.call_cdp(
-                        "Target.attachToTarget",
-                        {"targetId": tid, "flatten": True},
-                        msg_id,
-                    )
-                    msg_id += 1
-                    sid = att.get("result", {}).get("sessionId", "")
-                    if sid:
-                        sessions.append((sid, u[:40]))
-            if sessions:
-                return ws, sessions, msg_id, f"targets={summary}"
-            errs.append(f"targets={summary}")
+            target_map = {}
+            active_pages, msg_id, summary_str = refresh_browser_sessions(
+                ws, target_map, msg_id
+            )
+            if active_pages:
+                return ws, True, target_map, active_pages, msg_id, summary_str
+            errs.append(summary_str)
             ws.close()
         except Exception as e:
             errs.append(f"ws({port}):{e}")
     else:
         errs.append(f"no_active_port({port},{browser_path})")
 
-    # 2. Fallback to HTTP /json/list on candidate ports
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     ports = [p for p in ([port] if port else []) + [9223, 9222] if p]
     for pt in ports:
@@ -972,11 +1056,20 @@ def connect_workbench_cdp():
                     if ws_url:
                         ws = SimpleWebSocket(ws_url)
                         ws.connect()
-                        return ws, [("", "http_ws")], msg_id, ""
+                        ws.eval_js(SETUP_JS, msg_id, "")
+                        msg_id += 1
+                        return (
+                            ws,
+                            False,
+                            {"http": ""},
+                            [("http", "", t.get("url", "http_ws"))],
+                            msg_id,
+                            "",
+                        )
         except Exception as e:
             errs.append(f"http({pt}):{e}")
             continue
-    return None, [], msg_id, "; ".join(errs)
+    return None, False, {}, [], msg_id, "; ".join(errs)
 
 
 def run_sync_loop():
@@ -985,7 +1078,9 @@ def run_sync_loop():
 
     save_ls_env("starting")
     ws = None
-    sessions = []
+    is_browser_ws = False
+    target_map = {}
+    active_pages = []
     msg_id = 1
     own_mtime = Path(__file__).stat().st_mtime
     gen_mtime = Path(generate_monitor.__file__).stat().st_mtime
@@ -998,7 +1093,7 @@ def run_sync_loop():
                 src = Path(__file__).read_text(encoding="utf-8")
                 if 'SETUP_JS = r"""' in src:
                     SETUP_JS = src.split('SETUP_JS = r"""', 1)[1].split('"""', 1)[0]
-                    for sid, _ in sessions:
+                    for _, sid, _ in active_pages:
                         if ws:
                             ws.eval_js(SETUP_JS, msg_id, sid)
                             msg_id += 1
@@ -1011,51 +1106,95 @@ def run_sync_loop():
 
         try:
             if ws is None:
-                ws, sessions, msg_id, dbg_err = connect_workbench_cdp()
-                if ws is None or not sessions:
+                (
+                    ws,
+                    is_browser_ws,
+                    target_map,
+                    active_pages,
+                    msg_id,
+                    dbg_err,
+                ) = connect_workbench_cdp()
+                if ws is None or not active_pages:
                     save_ls_env("no_cdp_ws", dbg_err)
-                    time.sleep(2.0)
+                    time.sleep(1.5)
                     continue
-                for sid, _ in sessions:
+            elif is_browser_ws:
+                active_pages, msg_id, dbg_err = refresh_browser_sessions(
+                    ws, target_map, msg_id
+                )
+                if not active_pages:
+                    save_ls_env("no_active_pages", dbg_err)
+                    time.sleep(1.0)
+                    continue
+
+            results = []
+            for tid, sid, t_url in active_pages:
+                probe_expr = (
+                    "(window.__AGY_PULSE_VERSION === '4.0' && typeof window.__getAgyActiveConvId === 'function') "
+                    "? window.__getAgyActiveConvId() : 'NEED_SETUP'"
+                )
+                p_resp = ws.eval_js(probe_expr, msg_id, sid)
+                msg_id += 1
+                page_conv = p_resp.get("result", {}).get("result", {}).get("value")
+                if page_conv == "NEED_SETUP" or page_conv is None:
                     ws.eval_js(SETUP_JS, msg_id, sid)
                     msg_id += 1
-
-            data = generate_monitor.analyze_session()
-            if data:
-                payload = json.dumps(data, ensure_ascii=False)
-                js_call = (
-                    f"(window.__AGY_PULSE_VERSION === '3.9' && typeof window.__updateAntigravityGauge === 'function') "
-                    f"? window.__updateAntigravityGauge({payload}) : 'NEED_SETUP'"
-                )
-                results = []
-                for sid, uprefix in sessions:
-                    resp = ws.eval_js(js_call, msg_id, sid)
+                    p_resp2 = ws.eval_js(
+                        "typeof window.__getAgyActiveConvId === 'function' ? window.__getAgyActiveConvId() : ''",
+                        msg_id,
+                        sid,
+                    )
                     msg_id += 1
-                    val = resp.get("result", {}).get("result", {}).get("value")
-                    if val == "NEED_SETUP" or val is None:
-                        s_resp = ws.eval_js(SETUP_JS, msg_id, sid)
-                        msg_id += 1
-                        resp2 = ws.eval_js(
-                            f"window.__updateAntigravityGauge({payload})",
-                            msg_id,
-                            sid,
-                        )
-                        msg_id += 1
-                        val = resp2.get("result", {}).get("result", {}).get("value")
-                        if val is None:
-                            val = f"raw:{str(resp2)[:100]}"
-                    results.append(f"{uprefix[-15:]}={val}")
-                save_ls_env(f"injected:{','.join(results)}", dbg_err)
-            else:
-                save_ls_env("no_session_data")
+                    page_conv = (
+                        p_resp2.get("result", {}).get("result", {}).get("value") or ""
+                    )
+
+                if not page_conv and t_url:
+                    m_u = UUID_RE.search(t_url)
+                    if m_u:
+                        page_conv = m_u.group(1).lower()
+
+                data = generate_monitor.analyze_session(
+                    page_conv if page_conv else None
+                )
+                if data:
+                    payload = json.dumps(data, ensure_ascii=False)
+                    u_resp = ws.eval_js(
+                        f"window.__updateAntigravityGauge({payload})", msg_id, sid
+                    )
+                    msg_id += 1
+                    val = u_resp.get("result", {}).get("result", {}).get("value")
+                    if isinstance(val, str) and val.startswith("CONV_MISMATCH:"):
+                        new_conv = val.split(":", 1)[1].strip()
+                        if new_conv:
+                            data2 = generate_monitor.analyze_session(new_conv)
+                            if data2:
+                                payload2 = json.dumps(data2, ensure_ascii=False)
+                                u_resp2 = ws.eval_js(
+                                    f"window.__updateAntigravityGauge({payload2})",
+                                    msg_id,
+                                    sid,
+                                )
+                                msg_id += 1
+                                val = (
+                                    u_resp2.get("result", {})
+                                    .get("result", {})
+                                    .get("value")
+                                )
+                    results.append(f"{(page_conv or 'auto')[:8]}={val}")
+                else:
+                    results.append(f"{(page_conv or 'auto')[:8]}=no_data")
+
+            save_ls_env(f"injected:{','.join(results)}", dbg_err)
         except Exception as e:
             save_ls_env("exception", str(e))
             if ws:
                 ws.close()
                 ws = None
-                sessions = []
+                target_map = {}
+                active_pages = []
 
-        time.sleep(1.5)
+        time.sleep(0.75)
 
 
 if __name__ == "__main__":

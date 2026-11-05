@@ -11,9 +11,12 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+_SESSION_CACHE: dict[str, tuple[float, float, dict]] = {}
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -166,7 +169,9 @@ def format_compact_tokens(n: int) -> str:
 
 def find_target_conversation(explicit_id: str | None = None) -> tuple[str, Path | None]:
     brain_dir = Path.home() / ".gemini" / "antigravity" / "brain"
-    if explicit_id and explicit_id != "new":
+    if explicit_id:
+        if explicit_id == "new":
+            return "new", None
         tp = brain_dir / explicit_id / ".system_generated" / "logs" / "transcript.jsonl"
         return explicit_id, (tp if tp.exists() else None)
 
@@ -194,6 +199,17 @@ def find_target_conversation(explicit_id: str | None = None) -> tuple[str, Path 
 
 def analyze_session(explicit_conv_id: str | None = None) -> dict:
     conv_id, transcript_path = find_target_conversation(explicit_conv_id)
+    now_ts = time.time()
+    tp_mtime = 0.0
+    if transcript_path and transcript_path.exists():
+        try:
+            tp_mtime = transcript_path.stat().st_mtime
+        except Exception:
+            tp_mtime = 0.0
+
+    cached = _SESSION_CACHE.get(conv_id)
+    if cached and (now_ts - cached[0] < 1.5) and cached[1] == tp_mtime:
+        return cached[2]
 
     # 1. 解析本地 transcript.jsonl（获取步数、轮次、工具调用耗时、压缩点及基础 Token）
     lines = []
@@ -209,6 +225,7 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
     compaction_count = 0
     detected_model = None
     user_turns = 0
+    sys_turns = 0
     planner_turns = 0
     tool_calls_count = 0
     tool_time_sec = 0.0
@@ -227,6 +244,8 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
             m_set = extract_model_from_settings(str(step.get("content", "")))
             if m_set:
                 detected_model = m_set
+        elif stype == "SYSTEM_MESSAGE":
+            sys_turns += 1
         elif stype == "PLANNER_RESPONSE":
             planner_turns += 1
             tcs = step.get("tool_calls", [])
@@ -249,6 +268,9 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
                     tool_time_sec += max(0.0, (t2 - t1).total_seconds())
                 except Exception:
                     pass
+
+    if user_turns == 0 and total_steps > 0:
+        user_turns = max(1, sys_turns)
 
     is_compacted = latest_cp_idx != -1
     active_start_idx = latest_cp_idx if is_compacted else 0
@@ -320,6 +342,9 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
             rpc_cum_in = 0
             rpc_cum_cr = 0
             rpc_cum_out = 0
+            rpc_last_in = 0
+            rpc_last_cr = 0
+            rpc_last_out = 0
 
             for g in gm_list:
                 cm = g.get("chatModel", {})
@@ -341,6 +366,10 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
                 rpc_cum_out += out_t
                 cum_thinking_output += thk_t
                 cum_response_output += rsp_t
+                if inp_t + cr_t > 0:
+                    rpc_last_in = inp_t
+                    rpc_last_cr = cr_t
+                    rpc_last_out = out_t
 
                 ttft_val = parse_proto_duration(cm.get("timeToFirstToken"))
                 strm_val = parse_proto_duration(cm.get("streamingDuration"))
@@ -366,6 +395,19 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
                 cum_input = rpc_cum_in
                 cum_cache_read = rpc_cum_cr
                 cum_output = rpc_cum_out
+
+            if last_input + last_cache_read == 0 and rpc_last_in + rpc_last_cr > 0:
+                last_input = rpc_last_in
+                last_cache_read = rpc_last_cr
+                last_output = rpc_last_out
+                if last_pr_idx == -1:
+                    total_active_context = last_input + last_cache_read + last_output + estimated_delta
+
+            if total_steps == 0 and len(gm_list) > 0:
+                total_steps = len(gm_list)
+                active_steps = total_steps
+                if user_turns == 0:
+                    user_turns = 1
 
             if ttft_cnt > 0:
                 avg_ttft_sec = tot_ttft / ttft_cnt
@@ -462,7 +504,7 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
 > | :--- | :--- | :--- | :--- | :--- |
 > | **{tps_text}** | **`{format_duration_zh(avg_ttft_sec)}`** | **`{format_duration_zh(llm_time_sec)}`** | **`{format_duration_zh(tool_time_sec)}`** (`{tool_calls_count} 次`) | **`{format_compact_tokens(total_tok_all)} tok`** (`\\${total_cost_usd:.4f}`) |"""
 
-    return {
+    res = {
         "status": "success",
         "conv_id": conv_id,
         "model": model_display,
@@ -515,6 +557,8 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
         },
         "markdown_card": markdown_card,
     }
+    _SESSION_CACHE[conv_id] = (now_ts, tp_mtime, res)
+    return res
 
 
 def main():
