@@ -10,6 +10,8 @@ for Google Antigravity 2.0.
 import json
 import os
 import re
+import ssl
+import subprocess
 import sys
 import time
 import urllib.request
@@ -17,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 _SESSION_CACHE: dict[str, tuple[float, float, dict]] = {}
+_LAST_DISCOVER_TS: float = 0.0
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -41,54 +44,176 @@ DEFAULT_SPEC = ("Gemini 4 Argon (Medium)", 1_048_576, 256_000, (2.00, 10.00, 0.1
 TOOL_TIME_PATTERN = re.compile(r"Created At:\s*([^\r\n]+)\r?\nCompleted At:\s*([^\r\n]+)")
 
 
+def _save_creds_to_cache(addr: str, csrf: str):
+    os.environ["ANTIGRAVITY_LS_ADDRESS"] = addr
+    os.environ["ANTIGRAVITY_CSRF_TOKEN"] = csrf
+    try:
+        existing = {}
+        if LS_ENV_CACHE.exists():
+            try:
+                existing = json.loads(LS_ENV_CACHE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        existing["address"] = addr
+        existing["csrf"] = csrf
+        LS_ENV_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        LS_ENV_CACHE.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def discover_live_ls_credentials() -> tuple[str, str]:
+    """自动从本机运行中的 language_server 进程与 DevToolsActivePort 探测最新端口与 CSRF Token"""
+    global _LAST_DISCOVER_TS
+    now = time.time()
+    if now - _LAST_DISCOVER_TS < 3.0:
+        return "", ""
+    _LAST_DISCOVER_TS = now
+
+    cmdline = ""
+    try:
+        if sys.platform == "win32":
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'language_server*' } | Select-Object -ExpandProperty CommandLine",
+            ]
+            out = subprocess.check_output(cmd, timeout=8.0, stderr=subprocess.DEVNULL)
+            cmdline = out.decode("utf-8", errors="ignore")
+        else:
+            out = subprocess.check_output(["ps", "-ef"], timeout=3.0, stderr=subprocess.DEVNULL)
+            for line in out.decode("utf-8", errors="ignore").splitlines():
+                if "language_server" in line and "--csrf_token" in line:
+                    cmdline += line + "\n"
+    except Exception:
+        pass
+
+    m_csrf = re.search(r"--csrf_token\s+([0-9a-fA-F-]{36})", cmdline)
+    if not m_csrf:
+        return "", ""
+    csrf = m_csrf.group(1).strip()
+
+    candidate_addrs = []
+    m_bridge = re.search(r"--host_bridge_url=https?://127\.0\.0\.1:(\d+)", cmdline)
+    if m_bridge:
+        bp = int(m_bridge.group(1))
+        candidate_addrs.extend([f"localhost:{bp + 2}", f"https://127.0.0.1:{bp + 1}", f"localhost:{bp + 1}"])
+
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        dt_file = Path(appdata) / "Antigravity" / "DevToolsActivePort"
+        if dt_file.exists():
+            try:
+                first_line = dt_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+                if first_line.isdigit():
+                    cp = int(first_line)
+                    for cand in (f"localhost:{cp + 3}", f"https://127.0.0.1:{cp + 2}"):
+                        if cand not in candidate_addrs:
+                            candidate_addrs.append(cand)
+            except Exception:
+                pass
+
+    ctx = ssl._create_unverified_context()
+    http_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    https_opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx)
+    )
+    for addr in candidate_addrs:
+        url = (
+            f"{addr}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+            if addr.startswith("http")
+            else f"http://{addr}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+        )
+        try:
+            req = urllib.request.Request(
+                url,
+                data=b"{}",
+                headers={
+                    "Content-Type": "application/json",
+                    "Connect-Protocol-Version": "1",
+                    "x-codeium-csrf-token": csrf,
+                },
+                method="POST",
+            )
+            op = https_opener if url.startswith("https://") else http_opener
+            with op.open(req, timeout=1.5) as resp:
+                if resp.status == 200:
+                    _save_creds_to_cache(addr, csrf)
+                    return addr, csrf
+        except Exception:
+            continue
+
+    return "", ""
+
+
 def get_ls_credentials() -> tuple[str, str]:
     """获取或从插件根目录缓存读取本地 Language Server 地址与 CSRF Token"""
     addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "").strip()
     csrf = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "").strip()
     if addr and csrf:
-        try:
-            LS_ENV_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            LS_ENV_CACHE.write_text(json.dumps({"address": addr, "csrf": csrf}), encoding="utf-8")
-        except Exception:
-            pass
+        _save_creds_to_cache(addr, csrf)
         return addr, csrf
 
     if LS_ENV_CACHE.exists():
         try:
             data = json.loads(LS_ENV_CACHE.read_text(encoding="utf-8"))
-            return str(data.get("address", "")).strip(), str(data.get("csrf", "")).strip()
+            c_addr = str(data.get("address", "")).strip()
+            c_csrf = str(data.get("csrf", "")).strip()
+            if c_addr and c_csrf:
+                return c_addr, c_csrf
         except Exception:
             pass
-    return "", ""
+    return discover_live_ls_credentials()
 
 
-def call_ls_rpc(method: str, payload: dict, timeout: float = 2.5) -> dict | None:
-    """调用本地 Language Server Connect-RPC 接口"""
-    addr, csrf = get_ls_credentials()
-    if not addr or not csrf:
-        return None
+def _do_ls_request(addr: str, csrf: str, method: str, payload: dict, timeout: float) -> dict | None:
     if not addr.startswith("http://") and not addr.startswith("https://"):
         url = f"http://{addr}/exa.language_server_pb.LanguageServerService/{method}"
     else:
         url = f"{addr}/exa.language_server_pb.LanguageServerService/{method}"
-    try:
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Connect-Protocol-Version": "1",
-                "x-codeium-csrf-token": csrf,
-            },
-            method="POST",
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1",
+            "x-codeium-csrf-token": csrf,
+        },
+        method="POST",
+    )
+    if url.startswith("https://"):
+        ctx = ssl._create_unverified_context()
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx)
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return None
-            return json.loads(resp.read().decode("utf-8", errors="ignore"))
-    except Exception:
-        return None
+    else:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
+        if resp.status != 200:
+            return None
+        return json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+
+def call_ls_rpc(method: str, payload: dict, timeout: float = 2.0) -> dict | None:
+    """调用本地 Language Server Connect-RPC 接口，若缓存端口失效则自动重探测"""
+    addr, csrf = get_ls_credentials()
+    if addr and csrf:
+        try:
+            res = _do_ls_request(addr, csrf, method, payload, timeout)
+            if res is not None:
+                return res
+        except Exception:
+            pass
+
+    new_addr, new_csrf = discover_live_ls_credentials()
+    if new_addr and new_csrf and (new_addr != addr or new_csrf != csrf):
+        try:
+            return _do_ls_request(new_addr, new_csrf, method, payload, timeout)
+        except Exception:
+            pass
+    return None
 
 
 def parse_proto_duration(val) -> float:

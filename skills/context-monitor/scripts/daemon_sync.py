@@ -25,16 +25,7 @@ PLUGIN_ROOT = SCRIPT_DIR.parents[2]
 sys.path.insert(0, str(SCRIPT_DIR))
 import generate_monitor
 
-# Single-instance lock on localhost:38291
-LOCK_PORT = 38291
-_lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-try:
-    _lock_socket.bind(("127.0.0.1", LOCK_PORT))
-except OSError:
-    sys.exit(0)
-
-
-def save_ls_env(status: str = "init", error: str = ""):
+def save_ls_env(status: str = "init", error: str = "", force_env: bool = False):
     """Persist live Antigravity Language Server address and CSRF token for standalone CLI queries."""
     addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "")
     csrf = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
@@ -46,10 +37,12 @@ def save_ls_env(status: str = "init", error: str = ""):
                 existing = json.loads(env_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        final_addr = (addr if force_env and addr else existing.get("address", "")) or addr
+        final_csrf = (csrf if force_env and csrf else existing.get("csrf", "")) or csrf
         payload = {
-            "address": addr or existing.get("address", ""),
-            "csrf": csrf or existing.get("csrf", ""),
-            "pulse_version": "4.0",
+            "address": final_addr,
+            "csrf": final_csrf,
+            "pulse_version": "4.1",
             "status": status,
             "error": error,
             "updated_at": time.strftime("%H:%M:%S"),
@@ -57,6 +50,19 @@ def save_ls_env(status: str = "init", error: str = ""):
         env_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
+
+
+# Always persist fresh LS env vars if launched with them, even before single-instance lock check
+if os.environ.get("ANTIGRAVITY_LS_ADDRESS") and os.environ.get("ANTIGRAVITY_CSRF_TOKEN"):
+    save_ls_env("env_handover", force_env=True)
+
+# Single-instance lock on localhost:38291
+LOCK_PORT = 38291
+_lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    _lock_socket.bind(("127.0.0.1", LOCK_PORT))
+except OSError:
+    sys.exit(0)
 
 
 class SimpleWebSocket:
@@ -164,7 +170,7 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '4.0';
+    window.__AGY_PULSE_VERSION = '4.1';
 
     // 1. Clean up and neutralize any legacy v1/v2 ('dsh-*' / 'antigravity-context-gauge-*') DOM elements, styles, and intervals
     const cleanupLegacy = () => {
@@ -554,6 +560,12 @@ SETUP_JS = r"""
     window.__agyPinned = false;
     window.__agyPulseMode = localStorage.getItem('agy_pulse_mode') || 'minimal';
     window.__agyConvCache = window.__agyConvCache || {};
+    Object.keys(window.__agyConvCache).forEach(k => {
+        const v = window.__agyConvCache[k];
+        if (!v || v._isSkeleton || (k !== 'new' && (!v.activity || !v.activity.steps))) {
+            delete window.__agyConvCache[k];
+        }
+    });
 
     window.__getAgyActiveConvId = () => {
         const href = window.location.href || '';
@@ -609,10 +621,11 @@ SETUP_JS = r"""
         if (!curConv) return;
         if (curConv !== window.__agyLastRenderedConvId || !g) {
             const cached = window.__agyConvCache && window.__agyConvCache[curConv];
-            if (cached) {
+            if (cached && !cached._isSkeleton) {
                 window.__updateAntigravityGauge(cached);
             } else {
                 window.__updateAntigravityGauge({
+                    _isSkeleton: true,
                     conv_id: curConv,
                     model: (window.__lastAgyPulseData && window.__lastAgyPulseData.model) || 'Model',
                     activity: { turns: 0, steps: 0, decode_tps: 0, e2e_tps: 0, llm_time_sec: 0, tool_time_sec: 0, avg_ttft_sec: 0 },
@@ -626,17 +639,19 @@ SETUP_JS = r"""
     window.__updateAntigravityGauge = (data) => {
         cleanupLegacy();
         if (!data) return false;
-        if (data.conv_id) {
+        if (data.conv_id && !data._isSkeleton) {
             window.__agyConvCache = window.__agyConvCache || {};
             window.__agyConvCache[data.conv_id] = data;
         }
         const curConv = window.__getAgyActiveConvId();
+        let mismatchRet = null;
         if (curConv && data.conv_id && data.conv_id !== curConv) {
-            const cached = window.__agyConvCache[curConv];
-            if (cached) {
+            mismatchRet = 'CONV_MISMATCH:' + curConv;
+            const cached = window.__agyConvCache && window.__agyConvCache[curConv];
+            if (cached && !cached._isSkeleton) {
                 data = cached;
             } else {
-                return 'CONV_MISMATCH:' + curConv;
+                return mismatchRet;
             }
         }
         window.__lastAgyPulseData = data;
@@ -932,9 +947,9 @@ SETUP_JS = r"""
             </div>
         `;
 
-        return true;
+        return mismatchRet || true;
     };
-    return 'READY_V3_1';
+    return 'READY_V4_1';
 })()
 """
 
@@ -1130,7 +1145,7 @@ def run_sync_loop():
             results = []
             for tid, sid, t_url in active_pages:
                 probe_expr = (
-                    "(window.__AGY_PULSE_VERSION === '4.0' && typeof window.__getAgyActiveConvId === 'function') "
+                    "(window.__AGY_PULSE_VERSION === '4.1' && typeof window.__getAgyActiveConvId === 'function') "
                     "? window.__getAgyActiveConvId() : 'NEED_SETUP'"
                 )
                 p_resp = ws.eval_js(probe_expr, msg_id, sid)
