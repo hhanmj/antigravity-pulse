@@ -76,10 +76,17 @@ def discover_live_ls_credentials() -> tuple[str, str]:
             cmd = [
                 "powershell",
                 "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
                 "-Command",
                 "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'language_server*' } | Select-Object -ExpandProperty CommandLine",
             ]
-            out = subprocess.check_output(cmd, timeout=8.0, stderr=subprocess.DEVNULL)
+            out = subprocess.check_output(
+                cmd,
+                timeout=8.0,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
             cmdline = out.decode("utf-8", errors="ignore")
         else:
             out = subprocess.check_output(["ps", "-ef"], timeout=3.0, stderr=subprocess.DEVNULL)
