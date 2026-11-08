@@ -43,7 +43,7 @@ def save_ls_env(status: str = "init", error: str = "", force_env: bool = False):
         payload = {
             "address": final_addr,
             "csrf": final_csrf,
-            "pulse_version": "4.1",
+            "pulse_version": "4.2",
             "status": status,
             "error": error,
             "updated_at": time.strftime("%H:%M:%S"),
@@ -171,7 +171,7 @@ class SimpleWebSocket:
 
 SETUP_JS = r"""
 (() => {
-    window.__AGY_PULSE_VERSION = '4.1';
+    window.__AGY_PULSE_VERSION = '4.2';
 
     // 1. Clean up and neutralize any legacy v1/v2 ('dsh-*' / 'antigravity-context-gauge-*') DOM elements, styles, and intervals
     const cleanupLegacy = () => {
@@ -567,6 +567,7 @@ SETUP_JS = r"""
 
     window.__agyActiveTab = null;
     window.__agyPinned = false;
+    window.__agyNeedsBackendSync = true;
     window.__agyPulseMode = localStorage.getItem('agy_pulse_mode') || 'minimal';
     window.__agyConvCache = window.__agyConvCache || {};
     Object.keys(window.__agyConvCache).forEach(k => {
@@ -576,21 +577,217 @@ SETUP_JS = r"""
         }
     });
 
+    window.__extractConvUuidFromUrl = (rawHref, rawPath, rawSearch) => {
+        const searchStr = String(rawSearch || '');
+        const mSearch = searchStr.match(/(?:[?&](?:tab=subagent_convo__|conversationId=|cascadeId=))([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
+        if (mSearch) return mSearch[1].toLowerCase();
+
+        let decPath = String(rawPath || '');
+        try { decPath = decodeURIComponent(decPath); } catch (_) {}
+        const mPath = decPath.match(/\/c\/(?:[^?#]*\/)?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
+        if (mPath) return mPath[1].toLowerCase();
+
+        let decHref = String(rawHref || '');
+        try { decHref = decodeURIComponent(decHref); } catch (_) {}
+        const mHrefSearch = decHref.match(/(?:[?&](?:tab=subagent_convo__|conversationId=|cascadeId=))([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
+        if (mHrefSearch) return mHrefSearch[1].toLowerCase();
+        const mHrefPath = decHref.match(/\/c\/(?:[^?#]*\/)?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
+        if (mHrefPath) return mHrefPath[1].toLowerCase();
+        return '';
+    };
+
     window.__getAgyActiveConvId = () => {
         const href = window.location.href || '';
         const path = window.location.pathname || '';
-        const mUrl = (path + ' ' + href).match(/(?:\/c\/|conversationId=|cascadeId=)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
-        if (mUrl) return mUrl[1].toLowerCase();
+        const search = window.location.search || '';
+        const fromUrl = window.__extractConvUuidFromUrl(href, path, search);
+        if (fromUrl) return fromUrl;
+
+        const cv = document.querySelector('[data-testid="conversation-view"][data-cascade-id]');
+        if (cv) {
+            const cid = cv.getAttribute('data-cascade-id') || '';
+            const mCv = cid.match(/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
+            if (mCv) return mCv[1].toLowerCase();
+        }
+
         const frames = document.querySelectorAll('iframe[src]');
         for (const f of frames) {
             if (f.offsetParent === null) continue;
-            const mFrame = (f.src || '').match(/(?:\/c\/|conversationId=|cascadeId=)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
-            if (mFrame) return mFrame[1].toLowerCase();
+            const fromFrame = window.__extractConvUuidFromUrl(f.src || '', '', '');
+            if (fromFrame) return fromFrame;
         }
         if (/^\/(c\/new|new)?\/?$/i.test(path) && /^https?:\/\//i.test(href)) {
             return 'new';
         }
         return '';
+    };
+
+    window.__extractAgyFrontendTelemetry = (targetConvId) => {
+        try {
+            const gEl = document.getElementById('agy-ctx-gauge');
+            const anchor = (gEl && gEl.parentElement) ||
+                           document.querySelector('button[data-testid="permissions-selector-trigger"]') ||
+                           document.querySelector('button[data-tooltip-id="voice-start-tooltip"]') ||
+                           document.querySelector('button.agy-send-button') ||
+                           document.querySelector('button[data-tooltip-id^="input-send-button"]');
+            if (!anchor) return null;
+            const fk = Object.keys(anchor).find(k => k.startsWith('__reactFiber$'));
+            if (!fk) return null;
+            let cur = anchor[fk];
+            let st = null;
+            let depth = 0;
+            while (cur && depth < 45) {
+                if (cur.memoizedProps && cur.memoizedProps.cascadeContext && cur.memoizedProps.cascadeContext.state) {
+                    st = cur.memoizedProps.cascadeContext.state;
+                    break;
+                }
+                cur = cur.return;
+                depth++;
+            }
+            if (!st || !st.agentStateProvider || typeof st.agentStateProvider.getState !== 'function') return null;
+            const ast = st.agentStateProvider.getState();
+            if (!ast) return null;
+            const astConv = String(ast.conversationId || '').toLowerCase();
+            if (targetConvId && targetConvId !== 'new' && astConv && !astConv.includes(targetConvId.toLowerCase())) {
+                return null;
+            }
+            const ts = ast.trajectorySlice || {};
+            const steps = Array.isArray(ts.stepsInSlice) ? ts.stepsInSlice : [];
+            const totalSteps = Number(ts.totalStepsLength || steps.length || 0);
+            if (totalSteps <= 0) return null;
+
+            let cumIn = 0, cumCr = 0, cumOut = 0, cumThk = 0, cumRsp = 0;
+            let lastIn = 0, lastCr = 0, lastOut = 0;
+            let ttftSum = 0, ttftCnt = 0, streamSum = 0, streamTok = 0, llmSec = 0, toolSec = 0;
+            let modelName = (st.selectedModel && st.selectedModel.label) ? String(st.selectedModel.label) : '';
+
+            for (const s of steps) {
+                const c = (s && s.step && s.step.case) ? s.step.case : '';
+                const md = (s && s.metadata) ? s.metadata : {};
+                if (!modelName && md.modelInfo && md.modelInfo.displayName) {
+                    modelName = String(md.modelInfo.displayName);
+                }
+                const mu = md.modelUsage;
+                const tCreate = md.createdAt ? Number(md.createdAt.seconds || 0) + Number(md.createdAt.nanos || 0) / 1e9 : 0;
+                const tView = md.viewableAt ? Number(md.viewableAt.seconds || 0) + Number(md.viewableAt.nanos || 0) / 1e9 : 0;
+                const tFin = md.finishedGeneratingAt ? Number(md.finishedGeneratingAt.seconds || 0) + Number(md.finishedGeneratingAt.nanos || 0) / 1e9 : 0;
+                const tStart = md.startedAt ? Number(md.startedAt.seconds || 0) + Number(md.startedAt.nanos || 0) / 1e9 : 0;
+                const tComp = md.completedAt ? Number(md.completedAt.seconds || 0) + Number(md.completedAt.nanos || 0) / 1e9 : 0;
+
+                if (mu && (mu.inputTokens || mu.cacheReadTokens || mu.outputTokens)) {
+                    const inp = Number(mu.inputTokens || 0);
+                    const cr = Number(mu.cacheReadTokens || 0);
+                    const out = Number(mu.outputTokens || 0);
+                    const thk = Number(mu.thinkingOutputTokens || 0);
+                    const rsp = Number(mu.responseOutputTokens || 0);
+                    cumIn += inp;
+                    cumCr += cr;
+                    cumOut += out;
+                    cumThk += thk;
+                    cumRsp += rsp;
+                    if (inp + cr > 0) {
+                        lastIn = inp;
+                        lastCr = cr;
+                        lastOut = out;
+                    }
+                    if (tCreate > 0 && tView >= tCreate) {
+                        const ttft = tView - tCreate;
+                        if (ttft > 0 && ttft < 300) {
+                            ttftSum += ttft;
+                            ttftCnt++;
+                        }
+                    }
+                    if (tView > 0 && tFin > tView) {
+                        const strm = tFin - tView;
+                        if (strm > 0 && strm < 600) {
+                            streamSum += strm;
+                            streamTok += (rsp > 0 ? rsp : out);
+                        }
+                    }
+                    if (tCreate > 0 && tFin > tCreate && (tFin - tCreate) < 600) {
+                        llmSec += (tFin - tCreate);
+                    }
+                } else if (c !== 'plannerResponse' && c !== 'userInput' && tStart > 0 && tComp >= tStart && (tComp - tStart) < 600) {
+                    toolSec += (tComp - tStart);
+                }
+            }
+
+            const activeCtx = lastIn + lastCr + lastOut;
+            const totalTok = cumIn + cumCr + cumOut;
+            const billedIn = cumIn + cumCr;
+            const cacheHitPct = billedIn > 0 ? Math.round((cumCr / billedIn) * 1000) / 10 : 0;
+            const lastPrompt = lastIn + lastCr;
+            const lastHitPct = lastPrompt > 0 ? Math.round((lastCr / lastPrompt) * 1000) / 10 : cacheHitPct;
+            const e2eTps = llmSec > 0 && cumOut > 0 ? cumOut / llmSec : 0;
+            const decodeTps = streamSum > 0 && streamTok > 0 ? streamTok / streamSum : e2eTps;
+            const avgTtft = ttftCnt > 0 ? ttftSum / ttftCnt : 0;
+
+            const lowModel = (modelName || 'Gemini 4 Argon (High)').toLowerCase();
+            let maxCtx = 1048576, compLim = 256000, inP = 2.0, outP = 10.0, crP = 0.10;
+            if (lowModel.includes('flash')) { inP = 0.75; outP = 3.75; crP = 0.075; }
+            else if (lowModel.includes('opus')) { maxCtx = 1000000; inP = 4.0; outP = 20.0; crP = 0.20; }
+            else if (lowModel.includes('sonnet')) { maxCtx = 1000000; inP = 2.0; outP = 10.0; crP = 0.20; }
+            else if (lowModel.includes('gpt')) { maxCtx = 131072; compLim = 80000; inP = 1.0; outP = 4.0; crP = 0.10; }
+
+            const costUsd = (cumIn / 1e6) * inP + (cumOut / 1e6) * outP + (cumCr / 1e6) * crP;
+            const usedPct = Math.min(100, Math.round((activeCtx / maxCtx) * 1000) / 10);
+            const compPct = Math.min(100, Math.round((activeCtx / compLim) * 1000) / 10);
+
+            const catSys = activeCtx > 0 ? Math.min(4956, Math.floor(activeCtx * 0.15)) : 0;
+            const catTools = activeCtx > 0 ? Math.min(5724, Math.floor(activeCtx * 0.18)) : 0;
+            const catSkills = activeCtx > 0 ? Math.min(3142, Math.floor(activeCtx * 0.10)) : 0;
+            const catMsgs = Math.max(0, activeCtx - catSys - catTools - catSkills);
+            const denom = Math.max(1, activeCtx);
+
+            return {
+                status: 'success',
+                _fromFrontendSlice: true,
+                conv_id: targetConvId || astConv,
+                model: modelName || 'Gemini 4 Argon (High)',
+                activity: {
+                    turns: (Array.isArray(ast.turns) && ast.turns.length > 0) ? ast.turns.length : 1,
+                    steps: totalSteps,
+                    active_steps: totalSteps,
+                    is_compacted: false,
+                    compaction_count: 0,
+                    llm_time_sec: Math.round(llmSec * 10) / 10,
+                    ttft_total_sec: Math.round(ttftSum * 10) / 10,
+                    stream_total_sec: Math.round(streamSum * 10) / 10,
+                    tool_time_sec: Math.round(toolSec * 10) / 10,
+                    avg_ttft_sec: Math.round(avgTtft * 10) / 10,
+                    decode_tps: Math.round(decodeTps * 10) / 10,
+                    e2e_tps: Math.round(e2eTps * 10) / 10,
+                    latest_tps: Math.round(decodeTps * 10) / 10
+                },
+                usage: {
+                    total_tokens: totalTok,
+                    cache_hit_pct: cacheHitPct,
+                    last_cache_hit_pct: lastHitPct,
+                    uncached_input_tokens: cumIn,
+                    cache_read_tokens: cumCr,
+                    output_tokens: cumOut,
+                    thinking_output_tokens: cumThk,
+                    response_output_tokens: cumRsp,
+                    equivalent_cost_usd: Math.round(costUsd * 10000) / 10000
+                },
+                context_meter: {
+                    used_tokens: activeCtx,
+                    max_tokens: maxCtx,
+                    compress_tokens: compLim,
+                    used_pct: usedPct,
+                    compress_pct: compPct,
+                    avg_cache_hit_pct: cacheHitPct,
+                    categories: {
+                        messages: { tokens: catMsgs, pct: Math.round((catMsgs / denom) * 1000) / 10 },
+                        tools: { tokens: catTools, pct: Math.round((catTools / denom) * 1000) / 10 },
+                        skills: { tokens: catSkills, pct: Math.round((catSkills / denom) * 1000) / 10 },
+                        system: { tokens: catSys, pct: Math.round((catSys / denom) * 1000) / 10 }
+                    }
+                }
+            };
+        } catch (_) {
+            return null;
+        }
     };
 
     window.__toggleAgyPulseMode = (e) => {
@@ -612,6 +809,38 @@ SETUP_JS = r"""
         return false;
     };
 
+    window.__agyCheckRouteSwitch = () => {
+        const curConv = window.__getAgyActiveConvId();
+        const g = document.getElementById('agy-ctx-gauge');
+        if (!curConv) return;
+        if (curConv !== window.__agyLastRenderedConvId || !g) {
+            window.__agyNeedsBackendSync = true;
+            const cached = window.__agyConvCache && window.__agyConvCache[curConv];
+            if (cached && !cached._isSkeleton && cached.activity && cached.activity.steps > 0) {
+                window.__updateAntigravityGauge(Object.assign({}, cached, { _fromCache: true }));
+            } else {
+                const feData = window.__extractAgyFrontendTelemetry(curConv);
+                if (feData) {
+                    window.__updateAntigravityGauge(Object.assign({}, feData, { _isSkeleton: true }));
+                } else {
+                    window.__updateAntigravityGauge({
+                        _isSkeleton: true,
+                        conv_id: curConv,
+                        model: (window.__lastAgyPulseData && window.__lastAgyPulseData.model) || 'Model',
+                        activity: { turns: 0, steps: 0, decode_tps: 0, e2e_tps: 0, llm_time_sec: 0, tool_time_sec: 0, avg_ttft_sec: 0 },
+                        usage: { total_tokens: 0, cache_hit_pct: 0, last_cache_hit_pct: 0, uncached_input_tokens: 0, cache_read_tokens: 0, output_tokens: 0, thinking_output_tokens: 0, equivalent_cost_usd: 0 },
+                        context_meter: { used_tokens: 0, max_tokens: 1048576, compress_tokens: 256000, used_pct: 0, compress_pct: 0, avg_cache_hit_pct: 0, categories: {} }
+                    });
+                }
+            }
+        } else if (!window.__lastAgyPulseData || !window.__lastAgyPulseData.activity || !window.__lastAgyPulseData.activity.steps || window.__lastAgyPulseData._fromFrontendSlice) {
+            const feData = window.__extractAgyFrontendTelemetry(curConv);
+            if (feData && feData.activity && feData.activity.steps > 0) {
+                window.__updateAntigravityGauge(feData);
+            }
+        }
+    };
+
     if (!window.__agyDocClickBound) {
         window.__agyDocClickBound = true;
         document.addEventListener('click', (e) => {
@@ -622,6 +851,11 @@ SETUP_JS = r"""
                 g.classList.remove('open');
                 g.querySelectorAll('.agy-hud-pill').forEach(b => b.classList.remove('active'));
             }
+            setTimeout(() => { if (window.__agyCheckRouteSwitch) window.__agyCheckRouteSwitch(); }, 25);
+            setTimeout(() => { if (window.__agyCheckRouteSwitch) window.__agyCheckRouteSwitch(); }, 150);
+        });
+        window.addEventListener('popstate', () => {
+            setTimeout(() => { if (window.__agyCheckRouteSwitch) window.__agyCheckRouteSwitch(); }, 10);
         });
     }
 
@@ -629,66 +863,78 @@ SETUP_JS = r"""
         try { clearInterval(window.__agyRouteTimer); } catch (_) {}
     }
     window.__agyRouteTimer = setInterval(() => {
-        const curConv = window.__getAgyActiveConvId();
-        const g = document.getElementById('agy-ctx-gauge');
-        if (!curConv) return;
-        if (curConv !== window.__agyLastRenderedConvId || !g) {
-            const cached = window.__agyConvCache && window.__agyConvCache[curConv];
-            if (cached && !cached._isSkeleton) {
-                window.__updateAntigravityGauge(cached);
-            } else {
-                window.__updateAntigravityGauge({
-                    _isSkeleton: true,
-                    conv_id: curConv,
-                    model: (window.__lastAgyPulseData && window.__lastAgyPulseData.model) || 'Model',
-                    activity: { turns: 0, steps: 0, decode_tps: 0, e2e_tps: 0, llm_time_sec: 0, tool_time_sec: 0, avg_ttft_sec: 0 },
-                    usage: { total_tokens: 0, cache_hit_pct: 0, last_cache_hit_pct: 0, uncached_input_tokens: 0, cache_read_tokens: 0, output_tokens: 0, thinking_output_tokens: 0, equivalent_cost_usd: 0 },
-                    context_meter: { used_tokens: 0, max_tokens: 1048576, compress_tokens: 256000, used_pct: 0, compress_pct: 0, avg_cache_hit_pct: 0, categories: {} }
-                });
-            }
-        }
+        if (window.__agyCheckRouteSwitch) window.__agyCheckRouteSwitch();
     }, 200);
 
     window.__updateAntigravityGauge = (data) => {
         if (!data) return false;
-        if (data.conv_id && !data._isSkeleton) {
-            window.__agyConvCache = window.__agyConvCache || {};
-            window.__agyConvCache[data.conv_id] = data;
-        }
+        const origIsSkeleton = !!data._isSkeleton;
+        const origFromCache = !!data._fromCache;
         const curConv = window.__getAgyActiveConvId();
         let mismatchRet = null;
         if (curConv && data.conv_id && data.conv_id !== curConv) {
             mismatchRet = 'CONV_MISMATCH:' + curConv;
+            window.__agyNeedsBackendSync = true;
             const cached = window.__agyConvCache && window.__agyConvCache[curConv];
-            if (cached && !cached._isSkeleton) {
+            if (cached && !cached._isSkeleton && cached.activity && cached.activity.steps > 0) {
                 data = cached;
             } else {
-                return mismatchRet;
+                const feData = window.__extractAgyFrontendTelemetry(curConv);
+                if (feData) {
+                    data = feData;
+                } else {
+                    return mismatchRet;
+                }
             }
         }
-        window.__lastAgyPulseData = data;
-        window.__agyLastRenderedConvId = data.conv_id || curConv || '';
 
-        // Locate microphone / action button container on the right side of the chat input bar
-        let micBtn = document.querySelector('button[data-tooltip-id="input-send-button-record-tooltip"]') ||
-                     document.querySelector('button[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
-                     document.querySelector('button[data-tooltip-id="input-send-button-send-tooltip"]') ||
-                     document.querySelector('button.agy-send-button');
-        if (!micBtn) {
-            const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
-                if (b.closest('nav, aside, [class*="sidebar"]')) return false;
-                const tip = b.getAttribute('data-tooltip-id') || '';
-                const aria = b.getAttribute('aria-label') || '';
-                return tip.includes('record') || tip.includes('send-button') || aria.includes('录音') || aria.includes('Record') || aria.includes('Send message');
-            });
-            if (candidates.length > 0) micBtn = candidates[candidates.length - 1];
+        const targetConv = curConv || data.conv_id || '';
+        if ((!data.activity || !data.activity.steps) && targetConv && targetConv !== 'new') {
+            const feData = window.__extractAgyFrontendTelemetry(targetConv);
+            if (feData && feData.activity && feData.activity.steps > 0) {
+                data = Object.assign({}, feData, {
+                    _isSkeleton: origIsSkeleton,
+                    _fromCache: origFromCache
+                });
+            }
         }
-        if (!micBtn || micBtn.closest('nav, aside, [class*="sidebar"]')) return false;
 
-        const micContainer = (micBtn.parentElement ? micBtn.parentElement.closest('.flex.items-center') : null) || micBtn.closest('.flex.items-center');
-        if (!micContainer || !micContainer.parentElement || micContainer.closest('nav, aside, [class*="sidebar"]')) return false;
+        let g = document.getElementById('agy-ctx-gauge');
+        let hostBar = (g && g.isConnected && g.parentElement) ? g.parentElement : null;
+        let micContainer = null;
 
-        const hostBar = micContainer.parentElement;
+        if (!hostBar) {
+            // Locate microphone / voice / send action button container on the right side of the chat input bar
+            let micBtn = document.querySelector('button[data-tooltip-id="input-send-button-record-tooltip"]') ||
+                         document.querySelector('button[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
+                         document.querySelector('button[data-tooltip-id="input-send-button-send-tooltip"]') ||
+                         document.querySelector('button[data-tooltip-id="voice-start-tooltip"]') ||
+                         document.querySelector('[data-testid="voice-start-button"]') ||
+                         document.querySelector('[data-testid="voice-live-pill"]') ||
+                         document.querySelector('button.agy-send-button');
+            if (!micBtn) {
+                const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
+                    if (b.closest('nav, aside, [class*="sidebar"]')) return false;
+                    const tip = b.getAttribute('data-tooltip-id') || '';
+                    const aria = b.getAttribute('aria-label') || '';
+                    return tip.includes('record') || tip.includes('send-button') || tip.includes('voice-start') || aria.includes('录音') || aria.includes('Record') || aria.includes('Voice mode') || aria.includes('Send message');
+                });
+                if (candidates.length > 0) micBtn = candidates[candidates.length - 1];
+            }
+            if (!micBtn || micBtn.closest('nav, aside, [class*="sidebar"]')) return false;
+
+            const permBtn = document.querySelector('button[data-testid="permissions-selector-trigger"]');
+            if (permBtn && permBtn.parentElement && permBtn.parentElement.contains(micBtn)) {
+                hostBar = permBtn.parentElement;
+                micContainer = Array.from(hostBar.children).find(ch => ch !== permBtn && ch.id !== 'agy-ctx-gauge' && ch.contains(micBtn)) || null;
+            }
+            if (!hostBar || !micContainer) {
+                micContainer = (micBtn.parentElement ? micBtn.parentElement.closest('.flex.items-center') : null) || micBtn.closest('.flex.items-center');
+                if (!micContainer || !micContainer.parentElement || micContainer.closest('nav, aside, [class*="sidebar"]')) return false;
+                hostBar = micContainer.parentElement;
+            }
+        }
+
         hostBar.style.position = 'relative';
         hostBar.style.zIndex = '100';
         const formBox = hostBar.closest('form') || hostBar.parentElement?.parentElement;
@@ -697,7 +943,6 @@ SETUP_JS = r"""
             formBox.style.zIndex = '100';
         }
 
-        let g = document.getElementById('agy-ctx-gauge');
         if (!g || g.parentElement !== hostBar) {
             if (g) g.remove();
             g = document.createElement('div');
@@ -712,7 +957,11 @@ SETUP_JS = r"""
                     <div class="agy-hud-panel" data-panel="context"></div>
                 </div>
             `;
-            hostBar.insertBefore(g, micContainer);
+            if (micContainer && micContainer.parentElement === hostBar) {
+                hostBar.insertBefore(g, micContainer);
+            } else {
+                hostBar.appendChild(g);
+            }
 
             const switchTab = (tabName) => {
                 window.__agyActiveTab = tabName;
@@ -769,6 +1018,16 @@ SETUP_JS = r"""
                 }
             });
         }
+
+        if (data.conv_id && !data._isSkeleton && data.activity && data.activity.steps > 0) {
+            window.__agyConvCache = window.__agyConvCache || {};
+            window.__agyConvCache[data.conv_id] = data;
+        }
+        if (!origIsSkeleton && !origFromCache && !mismatchRet) {
+            window.__agyNeedsBackendSync = false;
+        }
+        window.__lastAgyPulseData = data;
+        window.__agyLastRenderedConvId = data.conv_id || curConv || '';
 
         const mode = window.__agyPulseMode || 'minimal';
         if (g.dataset.mode !== mode) {
@@ -996,7 +1255,7 @@ SETUP_JS = r"""
 
         return mismatchRet || true;
     };
-    return 'READY_V4_1';
+    return 'READY_V4_2';
 })()
 """
 
@@ -1032,10 +1291,27 @@ def get_devtools_active_port_info():
 
 
 import re
+import urllib.parse
 
-UUID_RE = re.compile(
-    r"(?:/c/|conversationId=|cascadeId=)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+UUID_QUERY_RE = re.compile(
+    r"(?:[?&](?:tab=subagent_convo__|conversationId=|cascadeId=))([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
+UUID_PATH_RE = re.compile(
+    r"/c/(?:[^?#]*/)?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
+def extract_conv_id_from_url(url_str: str) -> str:
+    if not url_str:
+        return ""
+    decoded = urllib.parse.unquote(url_str)
+    m_q = UUID_QUERY_RE.search(decoded)
+    if m_q:
+        return m_q.group(1).lower()
+    m_p = UUID_PATH_RE.search(decoded)
+    if m_p:
+        return m_p.group(1).lower()
+    return ""
 
 
 def refresh_browser_sessions(ws: SimpleWebSocket, target_map: dict, msg_id: int):
@@ -1196,13 +1472,14 @@ def run_sync_loop():
             results = []
             for tid, sid, t_url in active_pages:
                 probe_expr = (
-                    "(window.__AGY_PULSE_VERSION === '4.1' && typeof window.__getAgyActiveConvId === 'function') "
-                    "? (window.__getAgyActiveConvId() + '|' + (document.getElementById('agy-ctx-gauge') ? '1' : '0')) : 'NEED_SETUP'"
+                    "(window.__AGY_PULSE_VERSION === '4.2' && typeof window.__getAgyActiveConvId === 'function') "
+                    "? (window.__getAgyActiveConvId() + '|' + (document.getElementById('agy-ctx-gauge') ? (window.__agyLastRenderedConvId || '') : 'UNMOUNTED') + '|' + ((window.__agyNeedsBackendSync || (window.__lastAgyPulseData && window.__lastAgyPulseData._isSkeleton)) ? '1' : '0')) : 'NEED_SETUP'"
                 )
                 p_resp = ws.eval_js(probe_expr, msg_id, sid)
                 msg_id += 1
                 probe_val = p_resp.get("result", {}).get("result", {}).get("value")
-                is_mounted = False
+                rendered_conv = "UNMOUNTED"
+                needs_sync = "1"
                 if probe_val == "NEED_SETUP" or probe_val is None:
                     ws.eval_js(SETUP_JS, msg_id, sid)
                     msg_id += 1
@@ -1217,21 +1494,26 @@ def run_sync_loop():
                         p_resp2.get("result", {}).get("result", {}).get("value") or ""
                     )
                 else:
-                    parts = str(probe_val).split("|", 1)
-                    page_conv = parts[0]
-                    is_mounted = len(parts) > 1 and parts[1] == "1"
+                    parts = str(probe_val).split("|")
+                    page_conv = parts[0] if len(parts) > 0 else ""
+                    rendered_conv = parts[1] if len(parts) > 1 else "UNMOUNTED"
+                    needs_sync = parts[2] if len(parts) > 2 else "1"
 
                 if not page_conv and t_url:
-                    m_u = UUID_RE.search(t_url)
-                    if m_u:
-                        page_conv = m_u.group(1).lower()
+                    page_conv = extract_conv_id_from_url(t_url)
 
                 data = generate_monitor.analyze_session(
                     page_conv if page_conv else None
                 )
                 if data:
                     payload = json.dumps(data, ensure_ascii=False)
-                    if is_mounted and last_sent_payload.get(sid) == payload:
+                    target_conv_id = data.get("conv_id") or page_conv
+                    if (
+                        rendered_conv == target_conv_id
+                        and rendered_conv != "UNMOUNTED"
+                        and needs_sync == "0"
+                        and last_sent_payload.get(sid) == payload
+                    ):
                         results.append(f"{(page_conv or 'auto')[:8]}=cached")
                         continue
                     u_resp = ws.eval_js(

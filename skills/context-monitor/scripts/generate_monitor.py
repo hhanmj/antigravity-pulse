@@ -15,6 +15,7 @@ import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -223,6 +224,9 @@ def call_ls_rpc(method: str, payload: dict, timeout: float = 2.0) -> dict | None
             res = _do_ls_request(addr, csrf, method, payload, timeout)
             if res is not None:
                 return res
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 404):
+                return None
         except Exception:
             pass
 
@@ -350,6 +354,15 @@ def analyze_session(explicit_conv_id: str | None = None) -> dict:
             tp_mtime = transcript_path.stat().st_mtime
         except Exception:
             tp_mtime = 0.0
+    if conv_id and conv_id != "new":
+        conv_db_dir = Path.home() / ".gemini" / "antigravity" / "conversations"
+        for suffix in (".db-wal", ".db"):
+            dbp = conv_db_dir / f"{conv_id}{suffix}"
+            if dbp.exists():
+                try:
+                    tp_mtime = max(tp_mtime, dbp.stat().st_mtime)
+                except Exception:
+                    pass
 
     cached = _SESSION_CACHE.get(conv_id)
     if cached and (now_ts - cached[0] < 1.5) and cached[1] == tp_mtime:
