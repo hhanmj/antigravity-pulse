@@ -9,6 +9,7 @@ Antigravity Pulse — Native Telemetry HUD Daemon (v3.1)
   - Saved in localStorage ('agy_pulse_mode')
 - Automatic Light / Dark / Custom Theme Adaptation via Antigravity CSS Tokens
 """
+from __future__ import annotations
 
 import os
 import sys
@@ -247,12 +248,11 @@ SETUP_JS = r"""
             font-weight: 500;
             line-height: 1;
             cursor: pointer;
-            transition: all 0.14s ease;
+            transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
             white-space: nowrap;
         }
         #agy-ctx-gauge[data-mode="pro"] .agy-hud-pill {
             background: color-mix(in srgb, var(--hud-well) 50%, transparent);
-            padding: 0 5.5px;
         }
         .agy-hud-pill:hover,
         .agy-hud-pill.active {
@@ -304,6 +304,14 @@ SETUP_JS = r"""
             visibility: visible;
             transform: translateY(0) scale(1);
             pointer-events: auto;
+        }
+        .agy-hud-popover::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: -10px;
+            height: 10px;
         }
 
         .agy-hud-panel {
@@ -357,7 +365,7 @@ SETUP_JS = r"""
             cursor: pointer;
             border: 1px solid var(--hud-border);
             padding: 1.5px 6.5px;
-            transition: all 0.12s ease;
+            transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
             user-select: none;
             flex-shrink: 0;
         }
@@ -365,7 +373,8 @@ SETUP_JS = r"""
             background: var(--hud-hover-bg);
             color: var(--hud-fg);
         }
-        .agy-mode-switch .active-mode {
+        #agy-ctx-gauge[data-mode="minimal"] .agy-mode-switch .mode-min,
+        #agy-ctx-gauge[data-mode="pro"] .agy-mode-switch .mode-pro {
             color: var(--hud-fg);
             font-weight: 600;
         }
@@ -593,8 +602,12 @@ SETUP_JS = r"""
         try {
             localStorage.setItem('agy_pulse_mode', window.__agyPulseMode);
         } catch (_) {}
-        if (window.__lastAgyPulseData) {
-            window.__updateAntigravityGauge(window.__lastAgyPulseData);
+        const g = document.getElementById('agy-ctx-gauge');
+        if (g) {
+            g.dataset.mode = window.__agyPulseMode;
+            if (g.classList.contains('open')) {
+                window.__agyPinned = true;
+            }
         }
         return false;
     };
@@ -637,7 +650,6 @@ SETUP_JS = r"""
     }, 200);
 
     window.__updateAntigravityGauge = (data) => {
-        cleanupLegacy();
         if (!data) return false;
         if (data.conv_id && !data._isSkeleton) {
             window.__agyConvCache = window.__agyConvCache || {};
@@ -659,19 +671,21 @@ SETUP_JS = r"""
 
         // Locate microphone / action button container on the right side of the chat input bar
         let micBtn = document.querySelector('button[data-tooltip-id="input-send-button-record-tooltip"]') ||
-                     document.querySelector('button[data-tooltip-id="input-send-button-cancel-tooltip"]');
+                     document.querySelector('button[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
+                     document.querySelector('button[data-tooltip-id="input-send-button-send-tooltip"]') ||
+                     document.querySelector('button.agy-send-button');
         if (!micBtn) {
             const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
                 if (b.closest('nav, aside, [class*="sidebar"]')) return false;
                 const tip = b.getAttribute('data-tooltip-id') || '';
                 const aria = b.getAttribute('aria-label') || '';
-                return tip.includes('record') || aria.includes('录音') || aria.includes('Record');
+                return tip.includes('record') || tip.includes('send-button') || aria.includes('录音') || aria.includes('Record') || aria.includes('Send message');
             });
             if (candidates.length > 0) micBtn = candidates[candidates.length - 1];
         }
         if (!micBtn || micBtn.closest('nav, aside, [class*="sidebar"]')) return false;
 
-        const micContainer = micBtn.closest('.flex.items-center');
+        const micContainer = (micBtn.parentElement ? micBtn.parentElement.closest('.flex.items-center') : null) || micBtn.closest('.flex.items-center');
         if (!micContainer || !micContainer.parentElement || micContainer.closest('nav, aside, [class*="sidebar"]')) return false;
 
         const hostBar = micContainer.parentElement;
@@ -689,9 +703,9 @@ SETUP_JS = r"""
             g = document.createElement('div');
             g.id = 'agy-ctx-gauge';
             g.innerHTML = `
-                <div class="agy-hud-pill" data-tab="activity" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
-                <div class="agy-hud-pill" data-tab="usage" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
-                <div class="agy-hud-pill" data-tab="context" oncontextmenu="return window.__toggleAgyPulseMode(event)" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
+                <div class="agy-hud-pill" data-tab="activity" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
+                <div class="agy-hud-pill" data-tab="usage" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
+                <div class="agy-hud-pill" data-tab="context" title="左键固定 · 右键切换 [极简/详细] 模式"></div>
                 <div class="agy-hud-popover">
                     <div class="agy-hud-panel" data-panel="activity"></div>
                     <div class="agy-hud-panel" data-panel="usage"></div>
@@ -715,6 +729,9 @@ SETUP_JS = r"""
                 pill.addEventListener('mouseenter', () => {
                     if (!window.__agyPinned) switchTab(pill.dataset.tab);
                 });
+                pill.addEventListener('contextmenu', (e) => {
+                    window.__toggleAgyPulseMode(e);
+                });
                 pill.addEventListener('click', (e) => {
                     e.stopPropagation();
                     const tab = pill.dataset.tab;
@@ -730,6 +747,20 @@ SETUP_JS = r"""
                 });
             });
 
+            g.addEventListener('pointerdown', (e) => {
+                const sw = e.target && e.target.closest ? e.target.closest('.agy-mode-switch') : null;
+                if (sw && e.button === 0) {
+                    window.__toggleAgyPulseMode(e);
+                }
+            });
+            g.addEventListener('click', (e) => {
+                const sw = e.target && e.target.closest ? e.target.closest('.agy-mode-switch') : null;
+                if (sw) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            });
+
             g.addEventListener('mouseleave', () => {
                 if (!window.__agyPinned) {
                     window.__agyActiveTab = null;
@@ -740,18 +771,46 @@ SETUP_JS = r"""
         }
 
         const mode = window.__agyPulseMode || 'minimal';
-        g.dataset.mode = mode;
+        if (g.dataset.mode !== mode) {
+            g.dataset.mode = mode;
+        }
         const zh = window.__isZh();
 
         const act = data.activity || {};
         const usg = data.usage || {};
         const ctx = data.context_meter || {};
 
+        const dataKey = [
+            data.conv_id || '',
+            data._isSkeleton ? '1' : '0',
+            data.model || '',
+            zh ? '1' : '0',
+            act.turns || 0,
+            act.steps || 0,
+            Math.round(act.decode_tps || act.e2e_tps || 0),
+            act.llm_time_sec || 0,
+            act.tool_time_sec || 0,
+            act.avg_ttft_sec || 0,
+            act.compaction_count || 0,
+            usg.total_tokens || 0,
+            usg.cache_hit_pct || 0,
+            usg.last_cache_hit_pct || 0,
+            usg.output_tokens || 0,
+            ctx.used_tokens || 0,
+            ctx.used_pct || 0,
+            ctx.compress_pct || 0
+        ].join('|');
+
+        if (g._lastDataKey === dataKey) {
+            return mismatchRet || true;
+        }
+        g._lastDataKey = dataKey;
+
         const modeBadgeHtml = `
-            <span class="agy-tag agy-mode-switch" onclick="return window.__toggleAgyPulseMode(event)" title="${zh ? '点击切换 [极简 / 详细] 模式' : 'Switch [Min / Pro] mode'}">
-                <span class="${mode === 'minimal' ? 'active-mode' : ''}">${zh ? '极简' : 'Min'}</span>
+            <span class="agy-tag agy-mode-switch" title="${zh ? '点击切换 [极简 / 详细] 模式' : 'Switch [Min / Pro] mode'}">
+                <span class="mode-min">${zh ? '极简' : 'Min'}</span>
                 <span style="opacity:0.35">|</span>
-                <span class="${mode === 'pro' ? 'active-mode' : ''}">${zh ? '详细' : 'Pro'}</span>
+                <span class="mode-pro">${zh ? '详细' : 'Pro'}</span>
             </span>
         `;
 
@@ -759,22 +818,14 @@ SETUP_JS = r"""
         const pillAct = g.querySelector('[data-tab="activity"]');
         const tpsVal = Math.round(act.decode_tps || act.e2e_tps || 0);
         const gaugeSvg = `<svg width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>`;
-        if (mode === 'minimal') {
-            pillAct.innerHTML = `${gaugeSvg}<span class="mono-val">${tpsVal} tok/s</span>`;
-        } else {
-            const turnStepTxt = zh ? `${act.turns || 0}轮 ${act.steps || 0}步` : `${act.turns || 0}T ${act.steps || 0}S`;
-            pillAct.innerHTML = `${gaugeSvg}<span>${turnStepTxt}</span><span class="sep">·</span><span class="mono-val">${tpsVal} tok/s</span>`;
-        }
+        const turnStepTxt = zh ? `${act.turns || 0}轮 ${act.steps || 0}步` : `${act.turns || 0}T ${act.steps || 0}S`;
+        pillAct.innerHTML = `${gaugeSvg}<span class="pro-only">${turnStepTxt}<span class="sep">·</span></span><span class="mono-val">${tpsVal} tok/s</span>`;
 
         // 2. Pill 2: Cache & Token Usage
         const pillUsg = g.querySelector('[data-tab="usage"]');
         const hitVal = Math.round(usg.cache_hit_pct || 0);
         const dbSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>`;
-        if (mode === 'minimal') {
-            pillUsg.innerHTML = `${dbSvg}<span>${zh ? '缓存命中' : 'Cache'} <span class="mono-val">${hitVal}%</span></span>`;
-        } else {
-            pillUsg.innerHTML = `${dbSvg}<span class="mono-val">${window.__fmtTok(usg.total_tokens || 0)}</span><span class="sep">·</span><span>${zh ? '缓存' : 'Cache'} <span class="mono-val">${hitVal}%</span></span>`;
-        }
+        pillUsg.innerHTML = `${dbSvg}<span class="pro-only"><span class="mono-val">${window.__fmtTok(usg.total_tokens || 0)}</span><span class="sep">·</span></span><span><span class="min-only">${zh ? '缓存命中' : 'Cache'} </span><span class="pro-only">${zh ? '缓存' : 'Cache'} </span><span class="mono-val">${hitVal}%</span></span>`;
 
         // 3. Pill 3: Context Window Ring
         const pillCtx = g.querySelector('[data-tab="context"]');
@@ -782,11 +833,7 @@ SETUP_JS = r"""
         const pctRound = Math.round(usedPct);
         const ringColor = usedPct >= 24.4 ? 'var(--c-amber)' : (usedPct >= 18 ? 'var(--c-blue)' : 'var(--c-green)');
         const pillRing = window.__mkRingSvg(Math.max(4, usedPct), ringColor, 14);
-        if (mode === 'minimal') {
-            pillCtx.innerHTML = `${pillRing}<span class="mono-val">${pctRound}%</span>`;
-        } else {
-            pillCtx.innerHTML = `${pillRing}<span class="mono-val">~${window.__fmtTok(ctx.used_tokens || 0)}</span><span class="sep">·</span><span class="mono-val">${pctRound}%</span>`;
-        }
+        pillCtx.innerHTML = `${pillRing}<span class="pro-only"><span class="mono-val">~${window.__fmtTok(ctx.used_tokens || 0)}</span><span class="sep">·</span></span><span class="mono-val">${pctRound}%</span>`;
 
         // Panel 1: Activity
         const panAct = g.querySelector('[data-panel="activity"]');
@@ -1095,6 +1142,7 @@ def run_sync_loop():
     ws = None
     is_browser_ws = False
     target_map = {}
+    last_sent_payload = {}
     active_pages = []
     msg_id = 1
     own_mtime = Path(__file__).stat().st_mtime
@@ -1105,6 +1153,7 @@ def run_sync_loop():
             cur_own_mtime = Path(__file__).stat().st_mtime
             if cur_own_mtime != own_mtime:
                 own_mtime = cur_own_mtime
+                last_sent_payload.clear()
                 src = Path(__file__).read_text(encoding="utf-8")
                 if 'SETUP_JS = r"""' in src:
                     SETUP_JS = src.split('SETUP_JS = r"""', 1)[1].split('"""', 1)[0]
@@ -1115,6 +1164,7 @@ def run_sync_loop():
             cur_gen_mtime = Path(generate_monitor.__file__).stat().st_mtime
             if cur_gen_mtime != gen_mtime:
                 gen_mtime = cur_gen_mtime
+                last_sent_payload.clear()
                 importlib.reload(generate_monitor)
         except Exception:
             pass
@@ -1129,6 +1179,7 @@ def run_sync_loop():
                     msg_id,
                     dbg_err,
                 ) = connect_workbench_cdp()
+                last_sent_payload.clear()
                 if ws is None or not active_pages:
                     save_ls_env("no_cdp_ws", dbg_err)
                     time.sleep(1.5)
@@ -1146,14 +1197,16 @@ def run_sync_loop():
             for tid, sid, t_url in active_pages:
                 probe_expr = (
                     "(window.__AGY_PULSE_VERSION === '4.1' && typeof window.__getAgyActiveConvId === 'function') "
-                    "? window.__getAgyActiveConvId() : 'NEED_SETUP'"
+                    "? (window.__getAgyActiveConvId() + '|' + (document.getElementById('agy-ctx-gauge') ? '1' : '0')) : 'NEED_SETUP'"
                 )
                 p_resp = ws.eval_js(probe_expr, msg_id, sid)
                 msg_id += 1
-                page_conv = p_resp.get("result", {}).get("result", {}).get("value")
-                if page_conv == "NEED_SETUP" or page_conv is None:
+                probe_val = p_resp.get("result", {}).get("result", {}).get("value")
+                is_mounted = False
+                if probe_val == "NEED_SETUP" or probe_val is None:
                     ws.eval_js(SETUP_JS, msg_id, sid)
                     msg_id += 1
+                    last_sent_payload.pop(sid, None)
                     p_resp2 = ws.eval_js(
                         "typeof window.__getAgyActiveConvId === 'function' ? window.__getAgyActiveConvId() : ''",
                         msg_id,
@@ -1163,6 +1216,10 @@ def run_sync_loop():
                     page_conv = (
                         p_resp2.get("result", {}).get("result", {}).get("value") or ""
                     )
+                else:
+                    parts = str(probe_val).split("|", 1)
+                    page_conv = parts[0]
+                    is_mounted = len(parts) > 1 and parts[1] == "1"
 
                 if not page_conv and t_url:
                     m_u = UUID_RE.search(t_url)
@@ -1174,6 +1231,9 @@ def run_sync_loop():
                 )
                 if data:
                     payload = json.dumps(data, ensure_ascii=False)
+                    if is_mounted and last_sent_payload.get(sid) == payload:
+                        results.append(f"{(page_conv or 'auto')[:8]}=cached")
+                        continue
                     u_resp = ws.eval_js(
                         f"window.__updateAntigravityGauge({payload})", msg_id, sid
                     )
@@ -1196,6 +1256,10 @@ def run_sync_loop():
                                     .get("result", {})
                                     .get("value")
                                 )
+                                if val is True:
+                                    last_sent_payload[sid] = payload2
+                    elif val is True:
+                        last_sent_payload[sid] = payload
                     results.append(f"{(page_conv or 'auto')[:8]}={val}")
                 else:
                     results.append(f"{(page_conv or 'auto')[:8]}=no_data")

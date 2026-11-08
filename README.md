@@ -38,7 +38,7 @@ git clone https://github.com/hhanmj/antigravity-pulse.git "$env:USERPROFILE\.gem
 
 **macOS / Linux:**
 ```bash
-git clone https://github.com/hhanmj/antigravity-pulse.git ~/.gemini/config/plugins/context-monitor
+git clone https://github.com/hhanmj/antigravity-pulse.git ~/.gemini/config/plugins/context-monitor && bash ~/.gemini/config/plugins/context-monitor/install.sh
 ```
 
 ### 方式二：安装脚本

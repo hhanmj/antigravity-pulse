@@ -11,6 +11,6 @@ Provides a real-time bottom-bar telemetry HUD inside Google Antigravity 2.0 (wit
 
 Run `generate_monitor.py` and render its `markdown_report` field directly in your response:
 
-```powershell
-python "C:\Users\18380\.gemini\config\plugins\context-monitor\skills\context-monitor\scripts\generate_monitor.py"
+```bash
+python3 "$HOME/.gemini/config/plugins/context-monitor/skills/context-monitor/scripts/generate_monitor.py"
 ```

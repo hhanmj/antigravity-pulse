@@ -6,6 +6,7 @@ Real-time token speed (TPS), TTFT & tool timing, cache hit & billing breakdown,
 and 4-category context window radar (256K auto-compaction + 1M physical limit)
 for Google Antigravity 2.0.
 """
+from __future__ import annotations
 
 import json
 import os
@@ -107,9 +108,20 @@ def discover_live_ls_credentials() -> tuple[str, str]:
         bp = int(m_bridge.group(1))
         candidate_addrs.extend([f"localhost:{bp + 2}", f"https://127.0.0.1:{bp + 1}", f"localhost:{bp + 1}"])
 
+    dt_candidates = []
+    if os.environ.get("AGY_BROWSER_ACTIVE_PORT_FILE"):
+        dt_candidates.append(Path(os.environ["AGY_BROWSER_ACTIVE_PORT_FILE"]))
     appdata = os.environ.get("APPDATA", "")
     if appdata:
-        dt_file = Path(appdata) / "Antigravity" / "DevToolsActivePort"
+        dt_candidates.append(Path(appdata) / "Antigravity" / "DevToolsActivePort")
+    home = Path.home()
+    dt_candidates.extend(
+        [
+            home / "Library" / "Application Support" / "Antigravity" / "DevToolsActivePort",
+            home / ".config" / "Antigravity" / "DevToolsActivePort",
+        ]
+    )
+    for dt_file in dt_candidates:
         if dt_file.exists():
             try:
                 first_line = dt_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
